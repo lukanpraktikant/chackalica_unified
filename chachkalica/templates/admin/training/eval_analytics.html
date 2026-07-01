@@ -1,0 +1,82 @@
+{% extends "admin/base_site.html" %}
+
+{% block extrastyle %}{{ block.super }}
+<style>
+  .ev-cmp { max-width: 1100px; }
+  .ev-cmp h2 { margin-top: 1.6em; border-bottom: 1px solid #ccc; padding-bottom: .3em; }
+  .ev-cmp table { border-collapse: collapse; margin: 12px 0; }
+  .ev-cmp th, .ev-cmp td { padding: 6px 14px; border-bottom: 1px solid #e0e0e0; text-align: right; }
+  .ev-cmp th.rowlabel, .ev-cmp td.rowlabel { text-align: left; font-weight: 600; }
+  .ev-cmp thead th { text-align: right; vertical-align: bottom; }
+  .ev-cmp thead th.rowlabel { text-align: left; }
+  .ev-cmp .arch { display: block; font-weight: 400; font-size: 11px; color: #888; }
+  .ev-cmp .ds { display: block; font-weight: 400; font-size: 11px; color: #888; }
+  .ev-cmp td.best { background: #e3f6e6; color: #14692b; font-weight: 700; }
+  .ev-cmp td.na { color: #bbb; }
+  .ev-cmp .note { color: #777; font-size: 12px; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="ev-cmp">
+<p class="note">Comparing {{ columns|length }} evaluated model(s). Best value per row is highlighted;
+   count rows (predictions/targets/images) are context, not scored.</p>
+
+<h2>Overall metrics</h2>
+<table>
+  <thead>
+    <tr>
+      <th class="rowlabel">Metric</th>
+      {% for col in columns %}
+        <th>{{ col.model }}<span class="arch">{{ col.arch }}</span><span class="ds">on {{ col.dataset }}</span></th>
+      {% endfor %}
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in overall_rows %}
+      <tr>
+        <td class="rowlabel">{{ row.label }}</td>
+        {% for cell in row.cells %}
+          {% if cell.value is None %}<td class="na">—</td>
+          {% else %}<td class="{% if cell.is_best %}best{% endif %}">{{ cell.value|floatformat:4 }}</td>{% endif %}
+        {% endfor %}
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+{% if class_rows %}
+  <h2>Per-class AP</h2>
+  <table>
+    <thead>
+      <tr>
+        <th class="rowlabel">Class</th>
+        <th class="rowlabel">Metric</th>
+        {% for col in columns %}<th>{{ col.model }}</th>{% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for crow in class_rows %}
+        <tr>
+          <td class="rowlabel" rowspan="2">{{ crow.class_name }}</td>
+          <td class="rowlabel">AP@50</td>
+          {% for cell in crow.ap50 %}
+            {% if cell.value is None %}<td class="na">—</td>
+            {% else %}<td class="{% if cell.is_best %}best{% endif %}">{{ cell.value|floatformat:4 }}</td>{% endif %}
+          {% endfor %}
+        </tr>
+        <tr>
+          <td class="rowlabel">AP@50-95</td>
+          {% for cell in crow.ap50_95 %}
+            {% if cell.value is None %}<td class="na">—</td>
+            {% else %}<td class="{% if cell.is_best %}best{% endif %}">{{ cell.value|floatformat:4 }}</td>{% endif %}
+          {% endfor %}
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endif %}
+
+<p style="margin-top:1.5em"><a href="../" class="button cancel-link">Back to eval runs</a></p>
+</div>
+{% endblock %}

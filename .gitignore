@@ -1,0 +1,2 @@
+# Local stack env (secrets/machine-specific). Commit .env.example instead.
+.env

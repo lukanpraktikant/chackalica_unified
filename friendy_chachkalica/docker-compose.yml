@@ -1,0 +1,45 @@
+services:
+  trainer:
+    build: .
+    container_name: friendy-chachkalica-trainer
+    # Run as the host user so checkpoints/results written under data/training/runs
+    # stay owned by you — and Django (running as the same user) can read them back.
+    user: "${FC_UID:-1000}:${FC_GID:-1000}"
+    ports:
+      # Host port must match Django's service_base_url (http://localhost:8200).
+      - "${FC_PORT:-8200}:${FC_PORT:-8200}"
+    environment:
+      FC_PORT: ${FC_PORT:-8200}
+      # Single-GPU safety: refuse a second concurrent launch with HTTP 409.
+      FC_MAX_CONCURRENT: ${FC_MAX_CONCURRENT:-1}
+    # PyTorch DataLoader workers (num_workers > 0) pass image batches between
+    # processes through /dev/shm. Docker's default 64 MB is far too small and
+    # the loader dies with "unable to allocate shared memory ... No space left
+    # on device". Give it room; bump higher for many workers / large batches.
+    shm_size: ${FC_SHM_SIZE:-2gb}
+    volumes:
+      # ──────────────────────── THE SHARED FILESYSTEM ────────────────────────
+      # Django writes config YAMLs whose paths are ABSOLUTE, built from its own
+      # BASE_DIR. Django runs in the chachkalica web/worker containers at WORKDIR
+      # /app, so BASE_DIR=/app and every baked path is /app/data/... (the config
+      # itself, images, labels, output_dir). The trainer receives those exact
+      # strings over HTTP and opens them as-is — it cannot rewrite them. So it
+      # must expose the same files at the SAME path (/app/data), physically
+      # backed by the host data dir. Mismatch → HTTP 400 "config not found".
+      - "${HOST_DATA_DIR:?set HOST_DATA_DIR in .env}:${TRAINER_DATA_DIR:-/app/data}"
+      # Source images/labels are read-only inputs. This nested mount shadows the
+      # line above for the source/ subtree; runs/ and configs/ stay writable.
+      - "${HOST_DATA_DIR}/source:${TRAINER_DATA_DIR:-/app/data}/source:ro"
+    restart: unless-stopped
+
+    # ───────────────────────────────── GPU ─────────────────────────────────
+    # Requires the NVIDIA Container Toolkit on the host. Uncomment to expose the
+    # GPU(s); without it, device 'auto' falls back to CPU — fine for the
+    # synthetic smoke test, impractical for real training.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]

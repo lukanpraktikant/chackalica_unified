@@ -1,0 +1,11 @@
+# Keep the build context small — these are huge and/or irrelevant to the image.
+.venv/
+data/
+runs/
+__pycache__/
+**/__pycache__/
+*.pyc
+.git/
+.env
+*.pt
+*.pth

@@ -1,0 +1,123 @@
+name: smoke-test
+output_dir: ../runs/smoke-test
+
+datasets:
+  train:
+    - name: chvg-dataset
+      images: /home/luka/workspace/chachkalica/friendy_chachkalica/data/chvg_dataset/images
+      labels: ../data/chvg_dataset/labels_universal_with_missing_ppe
+      classes:
+        - head
+        - glass
+        - helmet
+        - vest
+        - person
+        - no_helmet
+        - no_vest
+
+    - name: kaggle-dataset
+      images: /home/luka/workspace/chachkalica/friendy_chachkalica/data/kaggle_dataset/images
+      labels: /home/luka/workspace/chachkalica/friendy_chachkalica/data/kaggle_dataset/labels
+      classes:
+        - helmet
+        - Mask
+        - no_helmet
+        - NO-Mask
+        - no_vest
+        - Person
+        - Safety Cone
+        - vest
+        - machinery
+        - vehicle
+
+    - name: ultralytics-dataset
+      images: /home/luka/workspace/chachkalica/friendy_chachkalica/data/ultralytics_dataset/images
+      labels: /home/luka/workspace/chachkalica/friendy_chachkalica/data/ultralytics_dataset/labels
+      classes:
+        - helmet
+        - vest
+        - goggles
+        - Person
+        - boots
+        - gloves
+        - no_boots
+        - no_gloves
+        - no_goggle
+        - no_helmet
+        - no_vest
+
+  val:
+    name: test_0-val
+    images: /home/luka/workspace/chachkalica/friendy_chachkalica/data/test_dataset_0/images
+    labels: /home/luka/workspace/chachkalica/friendy_chachkalica/data/test_dataset_0/labels
+    classes:
+      - gloves
+      - goggles
+      - helmet
+      - no_gloves
+      - no_goggles
+      - no_helmet
+      - no_vest
+      - vest
+
+  test:
+    name: test_0
+    images: /home/luka/workspace/chachkalica/friendy_chachkalica/data/test_dataset_0/images
+    labels: /home/luka/workspace/chachkalica/friendy_chachkalica/data/test_dataset_0/labels
+    classes:
+      - gloves
+      - goggles
+      - helmet
+      - no_gloves
+      - no_goggles
+      - no_helmet
+      - no_vest
+      - vest
+
+models:
+  - name: retinanet
+    num_classes: auto
+    variant: resnet50_fpn_v2
+    weights_backbone: DEFAULT
+    weights: null
+    trainable_backbone_layers: null
+    min_size: 640
+    max_size: 960
+
+  - name: yolox
+    num_classes: auto
+    variant: yolox-nano
+    weights: null
+    score_threshold: 0.3
+    nms_threshold: 0.45
+    act: silu
+
+  - name: rtdetr
+    num_classes: auto
+    weights: PekingU/rtdetr_r50vd
+    score_threshold: 0.5
+    input_max_size: 1280
+    image_mean: [0.485, 0.456, 0.406]
+    image_std: [0.229, 0.224, 0.225]
+    ignore_mismatched_sizes: true
+
+training:
+  epochs: 20
+  batch_size: 4
+  num_workers: 4
+  device: cuda
+  seed: 42
+  amp: true
+  gradient_clip_norm: null
+  optimizer:
+    name: adamw
+    lr: 0.0001
+    weight_decay: 0.0001
+    params: {}
+  scheduler: null
+
+evaluation:
+  batch_size: 4
+  num_workers: 4
+  score_threshold: 0.05
+  iou_thresholds: [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95]

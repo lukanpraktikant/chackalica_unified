@@ -1,0 +1,3 @@
+-r requirements.txt
+# YOLOX model code is vendored under vendor/yolox.
+# No external YOLOX package is required.

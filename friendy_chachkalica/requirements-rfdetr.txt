@@ -1,0 +1,5 @@
+-r requirements.txt
+# RF-DETR (Roboflow). Use the plain `rfdetr` package only — it is Apache 2.0 and
+# free for commercial, closed-source use. Do NOT install `rfdetr[plus]`: the XLarge/
+# 2XLarge models it adds are licensed under PML 1.0 and are NOT free for commercial use.
+rfdetr

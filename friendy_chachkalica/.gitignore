@@ -1,0 +1,11 @@
+# Secrets
+.env
+
+# Data & run artifacts
+.venv/
+data/*
+runs/
+
+# Python
+__pycache__/
+*.pyc
