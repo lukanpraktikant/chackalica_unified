@@ -27,6 +27,7 @@ from training.models import (
     TrainingRun,
     TrainingSettings,
 )
+from training.forms import ExperimentModelForm
 from training.services import config_gen, ingest, promote
 
 
@@ -52,13 +53,17 @@ class ExperimentDatasetInline(admin.TabularInline):
     fields = ["dataset", "role", "label_source", "annotator", "explicit_labels_path"]
 
 
-class ExperimentModelInline(admin.TabularInline):
+class ExperimentModelInline(admin.StackedInline):
+    # Stacked (not tabular) so each model gets a vertical form: the form exposes
+    # a field per builder option of every arch (size/variant, thresholds, backbone
+    # weights …) and JS hides the ones not matching the selected arch. num_classes
+    # stays optional — blank means "auto", resolved per train dataset.
     model = ExperimentModel
+    form = ExperimentModelForm
     extra = 1
-    # num_classes is intentionally omitted: it defaults to "auto" (resolved per
-    # train dataset from classes.txt). The model field stays for a programmatic
-    # override, but operators don't need to see it.
-    fields = ["arch", "pretrained", "params"]
+
+    class Media:
+        js = ("training/experiment_model_form.js",)
 
 
 @admin.register(Experiment)
