@@ -211,24 +211,36 @@ def build_rtdetr(
     elif weights is False:
         weights = None
 
-    if weights is None:
+    def _from_scratch():
         config = RTDetrConfig(
             num_labels=num_classes,
             id2label=id2label,
             label2id=label2id,
             **config_kwargs,
         )
-        model = RTDetrForObjectDetection(config)
+        return RTDetrForObjectDetection(config)
+
+    if weights is None:
+        model = _from_scratch()
     else:
-        config = RTDetrConfig.from_pretrained(weights, **config_kwargs)
-        config.id2label = id2label
-        config.label2id = label2id
-        config.num_labels = num_classes
-        model = RTDetrForObjectDetection.from_pretrained(
-            weights,
-            config=config,
-            ignore_mismatched_sizes=ignore_mismatched_sizes,
-        )
+        # Fall back to random init (not a crash) if the pretrained weights can't
+        # be fetched — e.g. HuggingFace is unreachable or the repo id is wrong.
+        try:
+            config = RTDetrConfig.from_pretrained(weights, **config_kwargs)
+            config.id2label = id2label
+            config.label2id = label2id
+            config.num_labels = num_classes
+            model = RTDetrForObjectDetection.from_pretrained(
+                weights,
+                config=config,
+                ignore_mismatched_sizes=ignore_mismatched_sizes,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[rtdetr] Pretrained weights {weights!r} unavailable ({exc}); "
+                f"training from scratch (random init)."
+            )
+            model = _from_scratch()
 
     return RTDETRAdapter(
         model=model,

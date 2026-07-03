@@ -27,6 +27,7 @@ from training.models import (
     TrainingRun,
     TrainingSettings,
 )
+from training import model_specs
 from training.forms import ExperimentModelForm
 from training.services import config_gen, ingest, promote
 
@@ -61,6 +62,12 @@ class ExperimentModelInline(admin.StackedInline):
     model = ExperimentModel
     form = ExperimentModelForm
     extra = 1
+
+    def get_fields(self, request, obj=None):
+        # arch first, then every arch's builder-option widgets (JS shows only the
+        # selected arch's), then the shared knobs. The spec fields are declared on
+        # the form, so listing them here is safe for the inline formset factory.
+        return ["arch", *model_specs.spec_field_names(), "pretrained", "num_classes", "params"]
 
     class Media:
         js = ("training/experiment_model_form.js",)

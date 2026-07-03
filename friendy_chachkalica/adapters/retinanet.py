@@ -87,13 +87,30 @@ def build_retinanet(
         else _resolve_weights(ResNet50_Weights, weights_backbone)
     )
 
-    model = builder(
-        weights=model_weights,
-        weights_backbone=backbone_weights,
-        num_classes=num_classes,
-        trainable_backbone_layers=trainable_backbone_layers,
-        **kwargs,
-    )
+    try:
+        model = builder(
+            weights=model_weights,
+            weights_backbone=backbone_weights,
+            num_classes=num_classes,
+            trainable_backbone_layers=trainable_backbone_layers,
+            **kwargs,
+        )
+    except Exception as exc:  # noqa: BLE001
+        if model_weights is None and backbone_weights is None:
+            raise  # no weights were requested, so this is a real build error
+        # Fall back to random init (not a crash) if the pretrained weights can't
+        # be downloaded — e.g. no network or a blocked torchvision host.
+        print(
+            f"[retinanet] Pretrained weights unavailable ({exc}); "
+            f"training from scratch (random init)."
+        )
+        model = builder(
+            weights=None,
+            weights_backbone=None,
+            num_classes=num_classes,
+            trainable_backbone_layers=trainable_backbone_layers,
+            **kwargs,
+        )
     return RetinaNetAdapter(model=model, num_classes=num_classes)
 
 

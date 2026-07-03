@@ -47,42 +47,54 @@ def _build_field(spec: dict, arch: str) -> forms.Field:
     return forms.CharField(widget=forms.TextInput(attrs=attrs), **common)
 
 
+def _spec_fields() -> dict:
+    """A declared form field per builder option of every arch.
+
+    Declared at class-definition time (below) so the fields land in
+    ``base_fields``/``declared_fields``: Django admin only renders — and the
+    inline formset factory only accepts — fields declared on the form class,
+    never ones added dynamically in ``__init__``.
+    """
+    return {
+        model_specs.field_name(arch, spec["key"]): _build_field(spec, arch)
+        for arch, specs in model_specs.ARCH_FIELD_SPECS.items()
+        for spec in specs
+    }
+
+
 class ExperimentModelForm(forms.ModelForm):
     class Meta:
         model = ExperimentModel
         fields = ["arch", "pretrained", "num_classes", "params"]
 
+    # Inject the per-option widgets into the class namespace so the metaclass
+    # picks them up as declared fields (see _spec_fields).
+    locals().update(_spec_fields())
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         params = dict(getattr(self.instance, "params", None) or {})
+        arch = self.instance.arch or ""
 
-        order = ["arch"]
-        for arch, specs in model_specs.ARCH_FIELD_SPECS.items():
-            for spec in specs:
-                fname = model_specs.field_name(arch, spec["key"])
-                field = _build_field(spec, arch)
-                # Seed the current stored value; only the selected arch's fields
-                # are ever read back, so cross-arch key sharing (e.g. "variant")
-                # is harmless.
-                if spec["key"] in params and arch == (self.instance.arch or ""):
-                    stored = params[spec["key"]]
-                    if spec["kind"] == "choice":
-                        stored_str = str(stored)
-                        values = [c[0] for c in field.choices]
-                        if stored_str not in values:
-                            # Preserve a hand-set value not in our list (e.g. a
-                            # custom rtdetr weights repo) as a selectable option.
-                            field.choices = list(field.choices) + [
-                                (stored_str, f"(custom) {stored_str}")
-                            ]
-                        field.initial = stored_str
-                    else:
-                        field.initial = stored
-                self.fields[fname] = field
-                order.append(fname)
-
-        order += ["pretrained", "num_classes", "params"]
-        self.order_fields(order)
+        # Seed each field of the *selected* arch with the stored value; only the
+        # selected arch's fields are ever read back, so cross-arch key sharing
+        # (e.g. "variant") is harmless.
+        for spec in model_specs.ARCH_FIELD_SPECS.get(arch, []):
+            if spec["key"] not in params:
+                continue
+            field = self.fields[model_specs.field_name(arch, spec["key"])]
+            stored = params[spec["key"]]
+            if spec["kind"] == "choice":
+                stored_str = str(stored)
+                if stored_str not in [c[0] for c in field.choices]:
+                    # Preserve a hand-set value not in our list (e.g. a custom
+                    # rtdetr weights repo) as a selectable option.
+                    field.choices = list(field.choices) + [
+                        (stored_str, f"(custom) {stored_str}")
+                    ]
+                field.initial = stored_str
+            else:
+                field.initial = stored
 
         # The raw JSON stays for open-ended ModelConfig kwargs the specs don't cover.
         self.fields["params"].help_text = (

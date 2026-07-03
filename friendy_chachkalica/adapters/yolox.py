@@ -183,7 +183,15 @@ def build_yolox(
         **builder_options,
     )
     if weights:
-        _load_checkpoint(model, weights)
+        # Fall back to random init (not a crash) if the pretrained weights can't
+        # be fetched/loaded — e.g. no network, a blocked host, or a bad path.
+        try:
+            _load_checkpoint(model, weights)
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[yolox] Pretrained weights {weights!r} unavailable ({exc}); "
+                f"training from scratch (random init)."
+            )
 
     return YOLOXAdapter(
         model=model,

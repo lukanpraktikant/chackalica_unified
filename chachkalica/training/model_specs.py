@@ -121,6 +121,19 @@ def field_name(arch: str, key: str) -> str:
     return f"{FIELD_PREFIX}{arch}_{key}"
 
 
+def spec_field_names() -> list[str]:
+    """Every builder-option form-field name, in arch/spec declaration order.
+
+    Shared by the form (which declares the fields) and the admin inline (which
+    lays them out) so the two never drift.
+    """
+    return [
+        field_name(arch, spec["key"])
+        for arch, specs in ARCH_FIELD_SPECS.items()
+        for spec in specs
+    ]
+
+
 def normalized_choices(spec: dict) -> list[tuple[str, str]]:
     """Spec choices as (value, label) pairs (a bare string becomes (s, s))."""
     out = []
