@@ -7,8 +7,8 @@ the winning cell flagged per row. Mirrors fleet's "analyze dataset" action, but
 across evaluated models rather than within one dataset.
 """
 
-# (metric key, human label, higher_is_better). The trailing three are counts,
-# not quality scores, so they get no winner highlight.
+# (metric key, human label, higher_is_better). The count rows are context, not
+# quality scores, so they get no winner highlight; eval time is lower-is-better.
 _METRICS = [
     ("map50", "mAP@50", True),
     ("map50_95", "mAP@50-95", True),
@@ -18,6 +18,7 @@ _METRICS = [
     ("num_predictions", "# predictions", None),
     ("num_targets", "# targets", None),
     ("num_images", "# images", None),
+    ("eval_seconds", "Eval time (s)", False),
 ]
 
 
@@ -26,12 +27,18 @@ def _num(value):
 
 
 def _column(eval_run) -> dict:
+    metrics = eval_run.metrics if isinstance(eval_run.metrics, dict) else {}
     return {
         "id": eval_run.pk,
         "model": eval_run.trained_model.name,
         "arch": eval_run.trained_model.arch,
         "dataset": eval_run.dataset.name,
-        "metrics": eval_run.metrics if isinstance(eval_run.metrics, dict) else {},
+        "metrics": metrics,
+        # When the eval ran (stamped by the trainer). Fall back to the row's
+        # finished timestamp for evals predating the metric.
+        "evaluated_at": metrics.get("evaluated_at") or (
+            eval_run.finished_at.isoformat(timespec="seconds") if eval_run.finished_at else None
+        ),
     }
 
 

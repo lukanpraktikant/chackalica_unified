@@ -11,6 +11,7 @@
   .ev-cmp thead th.rowlabel { text-align: left; }
   .ev-cmp .arch { display: block; font-weight: 400; font-size: 11px; color: #888; }
   .ev-cmp .ds { display: block; font-weight: 400; font-size: 11px; color: #888; }
+  .ev-cmp .ts { display: block; font-weight: 400; font-size: 11px; color: #888; }
   .ev-cmp td.best { background: #e3f6e6; color: #14692b; font-weight: 700; }
   .ev-cmp td.na { color: #bbb; }
   .ev-cmp .note { color: #777; font-size: 12px; }
@@ -28,7 +29,7 @@
     <tr>
       <th class="rowlabel">Metric</th>
       {% for col in columns %}
-        <th>{{ col.model }}<span class="arch">{{ col.arch }}</span><span class="ds">on {{ col.dataset }}</span></th>
+        <th>{{ col.model }}<span class="arch">{{ col.arch }}</span><span class="ds">on {{ col.dataset }}</span>{% if col.evaluated_at %}<span class="ts">evaluated {{ col.evaluated_at }}</span>{% endif %}</th>
       {% endfor %}
     </tr>
   </thead>

@@ -247,6 +247,25 @@ class EvalCompareTests(TestCase):
         map50_row = next(r for r in result["overall_rows"] if r["label"] == "mAP@50")
         self.assertFalse(map50_row["cells"][0]["is_best"])
 
+    def test_eval_time_surfaced_in_comparison(self):
+        from training.services import eval_analytics
+
+        slow = self._eval("slow", "yolox", {"map50": 0.5, "eval_seconds": 42.0,
+                                            "evaluated_at": "2026-07-03T10:00:00+00:00"})
+        fast = self._eval("fast", "rfdetr", {"map50": 0.4, "eval_seconds": 7.5,
+                                             "evaluated_at": "2026-07-03T11:00:00+00:00"})
+        result = eval_analytics.compare([slow, fast])
+
+        # The evaluated-at timestamp rides along on each column for the header.
+        by_model = {c["model"]: c for c in result["columns"]}
+        self.assertEqual(by_model["fast"]["evaluated_at"], "2026-07-03T11:00:00+00:00")
+
+        # Eval time is a lower-is-better row: the faster eval's cell wins.
+        time_row = next(r for r in result["overall_rows"] if r["label"] == "Eval time (s)")
+        cells = {c["model"]: cell for c, cell in zip(result["columns"], time_row["cells"])}
+        self.assertTrue(cells["fast"]["is_best"])
+        self.assertFalse(cells["slow"]["is_best"])
+
     def test_per_class_rows_union_classes(self):
         from training.services import eval_analytics
 

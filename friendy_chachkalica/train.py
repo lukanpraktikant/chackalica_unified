@@ -1,6 +1,8 @@
 import argparse
 import random
+import time
 from dataclasses import asdict, is_dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -426,7 +428,9 @@ def predict_dataset(
     records = []
     all_predictions = []
     all_targets = []
-    print(f"[train] Predicting dataset to: {output_path}")
+    started_at = datetime.now(timezone.utc)
+    start_perf = time.perf_counter()
+    print(f"[train] Predicting dataset to: {output_path} (started {started_at.isoformat(timespec='seconds')})")
     for batch_index, (images, targets) in enumerate(loader, start=1):
         images, targets = _move_batch_to_device(images, targets, device)
         predictions = _predict_with_config(adapter, images, config)
@@ -457,10 +461,14 @@ def predict_dataset(
         target_classes=target_classes,
         eval_classes=eval_classes,
     )
+    # Stamp the run with wall-clock timing so downstream tooling can show when the
+    # eval ran and how long it took, alongside the quality metrics.
+    metrics["evaluated_at"] = started_at.isoformat(timespec="seconds")
+    metrics["eval_seconds"] = round(time.perf_counter() - start_perf, 3)
     print(
         f"[train] Metrics: map50={metrics.get('map50')} "
         f"map50_95={metrics.get('map50_95')} precision={metrics.get('precision')} "
-        f"recall={metrics.get('recall')}"
+        f"recall={metrics.get('recall')} eval_seconds={metrics.get('eval_seconds')}"
     )
     return metrics
 

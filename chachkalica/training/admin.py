@@ -359,7 +359,7 @@ class TrainedModelAdmin(admin.ModelAdmin):
 @admin.register(EvalRun)
 class EvalRunAdmin(admin.ModelAdmin):
     list_display = ["__str__", "trained_model", "dataset", "status_badge",
-                    "map50", "map50_95", "created_at"]
+                    "map50", "map50_95", "eval_time", "created_at"]
     list_filter = ["status", "trained_model"]
     actions = ["analyze_selected", "launch_selected"]
     readonly_fields = [
@@ -406,6 +406,11 @@ class EvalRunAdmin(admin.ModelAdmin):
     @admin.display(description="mAP50-95")
     def map50_95(self, obj):
         return obj.metric("map50_95")
+
+    @admin.display(description="eval time")
+    def eval_time(self, obj):
+        seconds = obj.metric("eval_seconds")
+        return f"{seconds:.1f}s" if isinstance(seconds, (int, float)) else "—"
 
     @admin.action(description="Launch / relaunch on trainer service")
     def launch_selected(self, request, queryset):
