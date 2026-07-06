@@ -16,6 +16,13 @@ from training.services import autoeval, ingest, runner
 POLL_INTERVAL = 10       # seconds between status checks
 MAX_WAIT = 60 * 60 * 48  # give up after 48h
 
+# A single run_training/run_eval job polls for the *whole* run (up to MAX_WAIT),
+# so its RQ work-horse timeout must comfortably exceed MAX_WAIT. Otherwise RQ
+# kills the poller mid-run (the queue DEFAULT_TIMEOUT is only minutes) and the
+# row is stranded at "running" while training carries on in the trainer service.
+# Enqueue every run_training/run_eval with job_timeout=JOB_TIMEOUT.
+JOB_TIMEOUT = MAX_WAIT + 60 * 60  # poll window + an hour for launch/ingest
+
 
 def _mark(run: TrainingRun, status: str, *, error: str = "", finished: bool = False):
     run.status = status
@@ -60,6 +67,16 @@ def run_training(run_id: int, resume: bool = False) -> dict:
         _mark(run, TrainingRun.ERROR, error="timed out waiting for the run to finish", finished=True)
         return {"status": "error"}
 
+    return finalize_success(run)
+
+
+def finalize_success(run: TrainingRun) -> dict:
+    """Ingest a finished run, mark it OK, and schedule test evals.
+
+    The tail of a successful run — factored out so the reconcile sweep can
+    finalize a run whose poller died before reaching here (see
+    ``training.services.reconcile``).
+    """
     summary = ingest.ingest_run(run)
     _mark(run, TrainingRun.OK, finished=True)
 
@@ -117,6 +134,11 @@ def run_eval(eval_run_id: int) -> dict:
         _mark_eval(eval_run, EvalRun.ERROR, error="timed out waiting for eval", finished=True)
         return {"status": "error"}
 
+    return finalize_eval_success(eval_run)
+
+
+def finalize_eval_success(eval_run: EvalRun) -> dict:
+    """Ingest a finished eval and mark it OK. Shared with the reconcile sweep."""
     summary = ingest.ingest_eval(eval_run)
     _mark_eval(eval_run, EvalRun.OK, finished=True)
     return {"status": "ok", **summary}

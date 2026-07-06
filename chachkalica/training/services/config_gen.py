@@ -146,6 +146,7 @@ def build_experiment_dict(experiment: Experiment, output_dir: Path | str) -> dic
             "seed": experiment.seed,
             "amp": experiment.amp,
             "gradient_clip_norm": experiment.gradient_clip_norm,
+            "early_stopping_patience": experiment.early_stopping_patience,
             "optimizer": {
                 "name": experiment.optimizer_name,
                 "lr": experiment.lr,

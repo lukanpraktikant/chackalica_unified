@@ -53,6 +53,22 @@ def fetch_status(run, ts: TrainingSettings | None = None) -> dict:
     return resp.json()
 
 
+def stop(run, grace: float = 10.0, ts: TrainingSettings | None = None) -> dict:
+    """Ask the service to gracefully stop ``run``'s training process.
+
+    A 404 means the service has no record of the run (never launched, or the
+    service was restarted) — reported as ``{"status": "unknown"}`` so a kill can
+    proceed to clean up the DB/filesystem regardless.
+    """
+    resp = requests.post(
+        f"{base_url(ts)}/runs/{run.pk}/stop", params={"grace": grace}, timeout=TIMEOUT
+    )
+    if resp.status_code == 404:
+        return {"status": "unknown"}
+    resp.raise_for_status()
+    return resp.json()
+
+
 def launch_eval(eval_run, ts: TrainingSettings | None = None) -> dict:
     """Ask the service to evaluate a trained model from its generated request."""
     payload = {"eval_id": eval_run.pk, "request_path": eval_run.request_yaml_path}

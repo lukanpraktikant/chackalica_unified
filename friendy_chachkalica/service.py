@@ -13,14 +13,24 @@ Run it from the repo root:
     .venv/bin/uvicorn service:app --host 0.0.0.0 --port 8200
 
 Endpoints:
-    GET  /health           -> {"status": "ok"}
-    POST /train            -> {run_id, status, pid}    (body: {run_id, config_path, resume?})
-    GET  /runs/{run_id}    -> {run_id, status, returncode, started_at, finished_at, log_tail}
-    POST /eval             -> {eval_id, status, pid}   (body: {eval_id, request_path})
-    GET  /evals/{eval_id}  -> {eval_id, status, returncode, started_at, finished_at, log_tail}
+    GET  /health              -> {"status": "ok"}
+    POST /train               -> {run_id, status, pid}    (body: {run_id, config_path, resume?})
+    GET  /runs/{run_id}       -> {run_id, status, returncode, started_at, finished_at, log_tail}
+    POST /runs/{run_id}/stop  -> {run_id, status, outcome} (gracefully terminate a running train)
+    POST /eval                -> {eval_id, status, pid}   (body: {eval_id, request_path})
+    GET  /evals/{eval_id}     -> {eval_id, status, returncode, started_at, finished_at, log_tail}
+
+Operational logging (what the service itself does — launches, stops, rejections,
+errors) is written under ``<repo_root>/logs/``, split three ways: ``train/`` (one
+file per run, ``train-{run_id}.log``), ``eval/`` (``eval-{eval_id}.log``), and
+``other/service.log`` for everything not tied to a specific job. This is separate
+from each subprocess's own stdout, which the trainer keeps writing to
+``output_dir/service.log``.
 """
 
+import logging
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -36,10 +46,73 @@ HERE = Path(__file__).resolve().parent
 # Single-GPU safety: refuse a new launch while one is running unless overridden.
 MAX_CONCURRENT = int(os.environ.get("FC_MAX_CONCURRENT", "1"))
 
+# --- Operational logging -----------------------------------------------------
+# Overridable so containers can point logs at a mounted volume; defaults to the
+# repo root (HERE.parent) since the service runs with cwd=HERE.
+LOGS_DIR = Path(os.environ.get("FC_LOGS_DIR", HERE.parent / "logs"))
+TRAIN_LOG_DIR = LOGS_DIR / "train"
+EVAL_LOG_DIR = LOGS_DIR / "eval"
+OTHER_LOG_DIR = LOGS_DIR / "other"
+_LOG_FMT = "%(asctime)s [%(name)s] %(levelname)s %(message)s"
+
+
+def _configure_logging() -> None:
+    """Create the log dirs and attach a console handler to the ``fc`` root.
+
+    Per-job loggers (``fc.train.*``/``fc.eval.*``) and the service logger
+    (``fc.service``) each add their own FileHandler but propagate up to ``fc``
+    for the shared console output. ``fc`` itself does not propagate, so records
+    don't get duplicated by uvicorn's root logger.
+    """
+    for d in (TRAIN_LOG_DIR, EVAL_LOG_DIR, OTHER_LOG_DIR):
+        d.mkdir(parents=True, exist_ok=True)
+    root = logging.getLogger("fc")
+    root.setLevel(logging.INFO)
+    root.propagate = False
+    if not root.handlers:
+        stream = logging.StreamHandler()
+        stream.setFormatter(logging.Formatter(_LOG_FMT))
+        root.addHandler(stream)
+
+
+def _logger(name: str, log_path: Path) -> logging.Logger:
+    """Return the named logger, attaching a FileHandler to ``log_path`` once.
+
+    Loggers are cached by name by the logging module, so repeated calls (e.g.
+    every status poll for the same run) reuse the same handler rather than
+    piling up duplicates. FileHandler opens in append mode, so a run's log
+    accumulates across relaunches instead of being clobbered.
+    """
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.INFO)
+    if not any(getattr(h, "_fc_path", None) == str(log_path) for h in logger.handlers):
+        handler = logging.FileHandler(log_path, encoding="utf-8")
+        setattr(handler, "_fc_path", str(log_path))  # marker so we don't re-add on reuse
+        handler.setFormatter(logging.Formatter(_LOG_FMT))
+        logger.addHandler(handler)
+    return logger
+
+
+def _service_log() -> logging.Logger:
+    return _logger("fc.service", OTHER_LOG_DIR / "service.log")
+
+
+def _train_log(run_id: int) -> logging.Logger:
+    return _logger(f"fc.train.{run_id}", TRAIN_LOG_DIR / f"train-{run_id}.log")
+
+
+def _eval_log(eval_id: int) -> logging.Logger:
+    return _logger(f"fc.eval.{eval_id}", EVAL_LOG_DIR / f"eval-{eval_id}.log")
+
+
+_configure_logging()
+
 app = FastAPI(title="friendy_chachkalica trainer")
 
 _lock = threading.Lock()
-_jobs: dict[int, dict] = {}  # run_id -> {proc, pid, started_at, finished_at, log_path, ...}
+_jobs: dict[str, dict] = {}  # "train-{id}"/"eval-{id}" -> {proc, pid, started_at, ...}
+
+_service_log().info("service starting (max_concurrent=%s, logs=%s)", MAX_CONCURRENT, LOGS_DIR)
 
 
 class TrainRequest(BaseModel):
@@ -85,7 +158,11 @@ def _spawn(key: str, cmd: list[str], output_dir: Path) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
     log_path = output_dir / "service.log"
     log_file = open(log_path, "w", encoding="utf-8")
-    proc = subprocess.Popen(cmd, cwd=str(HERE), stdout=log_file, stderr=subprocess.STDOUT)
+    # start_new_session=True puts the child in its own process group so a later
+    # stop can signal the whole group (run.py may spawn dataloader/worker procs).
+    proc = subprocess.Popen(
+        cmd, cwd=str(HERE), stdout=log_file, stderr=subprocess.STDOUT, start_new_session=True,
+    )
     job = {
         "proc": proc,
         "pid": proc.pid,
@@ -98,6 +175,53 @@ def _spawn(key: str, cmd: list[str], output_dir: Path) -> dict:
     }
     _jobs[key] = job
     return job
+
+
+def _signal_proc(proc: subprocess.Popen, sig: int) -> None:
+    """Deliver ``sig`` to the child's whole process group when it leads its own
+    session (see ``start_new_session`` in _spawn), else to just the child.
+
+    The single-process fallback is a safety net for jobs launched before that
+    flag existed: signalling their group would be this service's own group.
+    """
+    try:
+        pgid = os.getpgid(proc.pid)
+        if pgid == proc.pid:
+            os.killpg(pgid, sig)
+            return
+    except (ProcessLookupError, OSError):
+        pass
+    try:
+        proc.send_signal(sig)
+    except ProcessLookupError:
+        pass
+
+
+def _stop_job(job: dict, grace: float = 10.0) -> str:
+    """Gracefully stop a job: SIGTERM, then SIGKILL if it outlasts ``grace``."""
+    proc: subprocess.Popen = job["proc"]
+    if proc.poll() is not None:
+        return "already exited"
+
+    _signal_proc(proc, signal.SIGTERM)
+    try:
+        proc.wait(timeout=grace)
+        outcome = "terminated"
+    except subprocess.TimeoutExpired:
+        _signal_proc(proc, signal.SIGKILL)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        outcome = "killed"
+
+    if job.get("finished_at") is None:
+        job["finished_at"] = time.time()
+    job["returncode"] = proc.returncode
+    log_file = job.get("_log_file")
+    if log_file and not log_file.closed:
+        log_file.close()
+    return outcome
 
 
 def _status_payload(job: dict) -> dict:
@@ -114,27 +238,35 @@ def _status_payload(job: dict) -> dict:
 
 @app.post("/train")
 def train(req: TrainRequest):
+    log = _train_log(req.run_id)
     config_path = Path(req.config_path)
     if not config_path.exists():
+        log.error("train rejected: config not found: %s", config_path)
         raise HTTPException(status_code=400, detail=f"config not found: {config_path}")
 
     with _lock:
         key = f"train-{req.run_id}"
         existing = _jobs.get(key)
         if existing and _job_status(existing) == "running":
+            log.info("train already running (pid=%s); ignoring duplicate launch", existing["pid"])
             return {"run_id": req.run_id, "status": "running", "pid": existing["pid"]}
         if _active_count() >= MAX_CONCURRENT:
+            log.warning("train rejected: trainer busy (%d active >= %d max)",
+                        _active_count(), MAX_CONCURRENT)
             raise HTTPException(status_code=409, detail="trainer busy: another run is active")
 
         try:
             output_dir = Path(yaml.safe_load(config_path.read_text())["output_dir"])
         except Exception as exc:  # noqa: BLE001
+            log.error("train rejected: bad config %s: %s", config_path, exc)
             raise HTTPException(status_code=400, detail=f"bad config: {exc}")
 
         cmd = [sys.executable, "run.py", str(config_path)]
         if req.resume:
             cmd.append("--resume")
         job = _spawn(key, cmd, output_dir)
+        log.info("launched train: pid=%s config=%s resume=%s output_dir=%s",
+                 job["pid"], config_path, req.resume, output_dir)
         return {"run_id": req.run_id, "status": "running", "pid": job["pid"]}
 
 
@@ -146,27 +278,50 @@ def run_status(run_id: int):
     return {"run_id": run_id, **_status_payload(job)}
 
 
+@app.post("/runs/{run_id}/stop")
+def stop_run(run_id: int, grace: float = 10.0):
+    log = _train_log(run_id)
+    with _lock:
+        job = _jobs.get(f"train-{run_id}")
+        if job is None:
+            log.warning("stop requested for unknown run")
+            raise HTTPException(status_code=404, detail="unknown run_id")
+        log.info("stop requested (grace=%ss)", grace)
+        outcome = _stop_job(job, grace=grace)
+    log.info("stop outcome=%s returncode=%s", outcome, job.get("returncode"))
+    return {"run_id": run_id, "status": _job_status(job), "outcome": outcome,
+            "returncode": job.get("returncode")}
+
+
 @app.post("/eval")
 def evaluate(req: EvalRequest):
+    log = _eval_log(req.eval_id)
     request_path = Path(req.request_path)
     if not request_path.exists():
+        log.error("eval rejected: request not found: %s", request_path)
         raise HTTPException(status_code=400, detail=f"eval request not found: {request_path}")
 
     with _lock:
         key = f"eval-{req.eval_id}"
         existing = _jobs.get(key)
         if existing and _job_status(existing) == "running":
+            log.info("eval already running (pid=%s); ignoring duplicate launch", existing["pid"])
             return {"eval_id": req.eval_id, "status": "running", "pid": existing["pid"]}
         if _active_count() >= MAX_CONCURRENT:
+            log.warning("eval rejected: trainer busy (%d active >= %d max)",
+                        _active_count(), MAX_CONCURRENT)
             raise HTTPException(status_code=409, detail="trainer busy: another job is active")
 
         try:
             output_dir = Path(yaml.safe_load(request_path.read_text())["output_dir"])
         except Exception as exc:  # noqa: BLE001
+            log.error("eval rejected: bad eval request %s: %s", request_path, exc)
             raise HTTPException(status_code=400, detail=f"bad eval request: {exc}")
 
         cmd = [sys.executable, "eval_checkpoint.py", str(request_path)]
         job = _spawn(key, cmd, output_dir)
+        log.info("launched eval: pid=%s request=%s output_dir=%s",
+                 job["pid"], request_path, output_dir)
         return {"eval_id": req.eval_id, "status": "running", "pid": job["pid"]}
 
 

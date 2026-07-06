@@ -1,0 +1,36 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+<p>This will <strong>gracefully kill</strong> the following training run(s): stop the
+training process on the trainer service, delete the run's output directory and
+config from the filesystem, then delete the run (and its results) from the database.
+<strong>This cannot be undone.</strong></p>
+
+{% for item in affected %}
+  <h3>Run #{{ item.run.pk }} — {{ item.run }}</h3>
+  <ul>
+    <li>status: <strong>{{ item.run.status }}</strong></li>
+    <li>output dir: <code>{{ item.run.output_dir|default:"—" }}</code></li>
+    <li>config: <code>{{ item.run.config_yaml_path|default:"—" }}</code></li>
+  </ul>
+  {% if item.models %}
+    <p class="errornote">Warning: {{ item.models|length }} promoted model(s) were built from
+    this run — their checkpoints live inside the output dir and will be removed, orphaning them:
+    {% for m in item.models %}<code>{{ m.name }}</code>{% if not forloop.last %}, {% endif %}{% endfor %}.</p>
+  {% endif %}
+{% endfor %}
+
+<form action="" method="post">
+  {% csrf_token %}
+  {% for pk in selected %}
+    <input type="hidden" name="{{ action_checkbox_name }}" value="{{ pk }}">
+  {% endfor %}
+  <input type="hidden" name="action" value="{{ action }}">
+  <input type="hidden" name="apply" value="1">
+
+  <div class="submit-row">
+    <input type="submit" class="default" value="Yes, kill run(s)">
+    <a href="../" class="button cancel-link">Cancel</a>
+  </div>
+</form>
+{% endblock %}

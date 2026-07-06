@@ -29,7 +29,7 @@ from training.models import (
 )
 from training import model_specs
 from training.forms import ExperimentModelForm
-from training.services import config_gen, ingest, promote
+from training.services import config_gen, ingest, promote, teardown
 
 
 def _queue():
@@ -86,7 +86,7 @@ class ExperimentAdmin(admin.ModelAdmin):
             {
                 "fields": [
                     "epochs", "batch_size", "num_workers", "device", "seed",
-                    "amp", "gradient_clip_norm",
+                    "amp", "gradient_clip_norm", "early_stopping_patience",
                     "optimizer_name", "lr", "weight_decay", "optimizer_params",
                     "scheduler_name", "scheduler_params",
                 ]
@@ -120,7 +120,7 @@ class ExperimentAdmin(admin.ModelAdmin):
             if request.POST.get("apply"):
                 run = TrainingRun.objects.create(experiment=experiment)
                 yaml_path, _text = config_gen.write_config(experiment, run)
-                _queue().enqueue(jobs.run_training, run.pk)
+                _queue().enqueue(jobs.run_training, run.pk, job_timeout=jobs.JOB_TIMEOUT)
                 run.status = TrainingRun.QUEUED
                 run.save(update_fields=["status"])
                 self.message_user(
@@ -175,7 +175,7 @@ class TrainingRunAdmin(admin.ModelAdmin):
     list_display = ["__str__", "experiment", "status_badge", "config_yaml_path", "created_at"]
     list_filter = ["status", "experiment"]
     inlines = [RunResultInline]
-    actions = ["launch_selected", "ingest_selected"]
+    actions = ["launch_selected", "ingest_selected", "reconcile_selected", "kill_run_gracefully"]
     readonly_fields = [
         "experiment", "status", "epoch_progress", "config_yaml_path", "output_dir",
         "last_error", "started_at", "finished_at", "results", "created_at",
@@ -222,7 +222,7 @@ class TrainingRunAdmin(admin.ModelAdmin):
                 self.message_user(request, f"Run #{run.pk} has no config; skipped.",
                                   level=messages.WARNING)
                 continue
-            queue.enqueue(jobs.run_training, run.pk)
+            queue.enqueue(jobs.run_training, run.pk, job_timeout=jobs.JOB_TIMEOUT)
             run.status = TrainingRun.QUEUED
             run.save(update_fields=["status"])
         self.message_user(request, "Launch job(s) queued — refresh to see progress.")
@@ -240,6 +240,52 @@ class TrainingRunAdmin(admin.ModelAdmin):
             run.status = TrainingRun.OK
             run.save(update_fields=["status"])
             self.message_user(request, f"Run #{run.pk}: ingested {summary['run_results']} result(s).")
+
+    @admin.action(description="Reconcile status from trainer / disk")
+    def reconcile_selected(self, request, queryset):
+        from training.services import reconcile
+
+        for run in queryset:
+            outcome = reconcile.reconcile_run(run)
+            self.message_user(request, f"Run #{run.pk}: {outcome}")
+
+    @admin.action(description="Kill run gracefully (stop, delete run + files)")
+    def kill_run_gracefully(self, request, queryset):
+        """Stop the training process, then delete the run's files and DB row.
+
+        Two-step: the first click shows a confirm page (with a warning for any
+        promoted models whose checkpoints would be removed); the form re-POSTs
+        with ``apply=1`` to actually tear down.
+        """
+        if request.POST.get("apply"):
+            for run in queryset:
+                outcome = teardown.kill_run(run)
+                self.message_user(
+                    request,
+                    f"Run #{outcome['run_id']}: stopped ({outcome['stopped']}); "
+                    f"removed {len(outcome['removed_paths'])} path(s); row deleted.",
+                    level=messages.WARNING if outcome["errors"] else messages.SUCCESS,
+                )
+                for err in outcome["errors"]:
+                    self.message_user(request, f"Run #{outcome['run_id']}: {err}",
+                                      level=messages.ERROR)
+            return None
+
+        runs = list(queryset)
+        affected = [
+            {"run": run,
+             "models": list(TrainedModel.objects.filter(source_run_result__run=run))}
+            for run in runs
+        ]
+        context = {
+            **self.admin_site.each_context(request),
+            "title": "Kill training run(s) gracefully",
+            "affected": affected,
+            "action": "kill_run_gracefully",
+            "selected": [str(run.pk) for run in runs],
+            "action_checkbox_name": ACTION_CHECKBOX_NAME,
+        }
+        return TemplateResponse(request, "admin/training/kill_run.html", context)
 
 
 @admin.register(RunResult)
@@ -343,7 +389,7 @@ class TrainedModelAdmin(admin.ModelAdmin):
                 eval_run.delete()
                 self.message_user(request, f"Cannot build eval request: {exc}", level=messages.ERROR)
                 return None
-            _queue().enqueue(jobs.run_eval, eval_run.pk)
+            _queue().enqueue(jobs.run_eval, eval_run.pk, job_timeout=jobs.JOB_TIMEOUT)
             eval_run.status = EvalRun.QUEUED
             eval_run.save(update_fields=["status"])
             self.message_user(request, f"Eval #{eval_run.pk} queued for {model.name} on {dataset.name}.")
@@ -368,7 +414,7 @@ class EvalRunAdmin(admin.ModelAdmin):
     list_display = ["__str__", "trained_model", "dataset", "status_badge",
                     "map50", "map50_95", "eval_time", "created_at"]
     list_filter = ["status", "trained_model"]
-    actions = ["analyze_selected", "launch_selected"]
+    actions = ["analyze_selected", "launch_selected", "reconcile_selected"]
     readonly_fields = [
         "trained_model", "dataset", "label_source", "annotator", "explicit_labels_path",
         "status", "request_yaml_path", "output_dir", "metrics", "last_error",
@@ -427,7 +473,15 @@ class EvalRunAdmin(admin.ModelAdmin):
                 self.message_user(request, f"Eval #{eval_run.pk} has no request; skipped.",
                                   level=messages.WARNING)
                 continue
-            queue.enqueue(jobs.run_eval, eval_run.pk)
+            queue.enqueue(jobs.run_eval, eval_run.pk, job_timeout=jobs.JOB_TIMEOUT)
             eval_run.status = EvalRun.QUEUED
             eval_run.save(update_fields=["status"])
         self.message_user(request, "Eval job(s) queued — refresh to see progress.")
+
+    @admin.action(description="Reconcile status from trainer / disk")
+    def reconcile_selected(self, request, queryset):
+        from training.services import reconcile
+
+        for eval_run in queryset:
+            outcome = reconcile.reconcile_eval(eval_run)
+            self.message_user(request, f"Eval #{eval_run.pk}: {outcome}")

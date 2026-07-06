@@ -201,6 +201,7 @@ def train_model(
     history = []
     best_score = None
     best_epoch = None
+    epochs_without_improvement = 0
     start_epoch = 1
 
     last_checkpoint = run_dir / "last.pt"
@@ -254,6 +255,8 @@ def train_model(
         if is_best:
             best_score = score
             best_epoch = epoch
+        if score is not None:
+            epochs_without_improvement = 0 if is_best else epochs_without_improvement + 1
 
         epoch_summary = {
             "epoch": epoch,
@@ -290,6 +293,18 @@ def train_model(
             f"lr={_current_lr(optimizer)} best={is_best}"
         )
 
+        # Early stopping: once val loss hasn't improved for `patience` epochs, stop
+        # — the best.pt checkpoint already holds the best epoch, so continuing just
+        # overfits. Only active when a val set produced a score.
+        patience = config.training.early_stopping_patience
+        if patience is not None and score is not None and epochs_without_improvement >= patience:
+            print(
+                f"[train] Run {run_name} early stopping at epoch {epoch}: no val "
+                f"improvement for {epochs_without_improvement} epoch(s) "
+                f"(best epoch {best_epoch}, best_loss={best_score})"
+            )
+            break
+
     if evaluate_after_train and test_loader is not None:
         print(f"[train] Run {run_name}: running post-train test prediction")
         best_checkpoint = run_dir / "best.pt"
@@ -325,7 +340,7 @@ def train_model(
         "run_dir": str(run_dir),
         "best_epoch": best_epoch,
         "best_loss": best_score,
-        "last_epoch": config.training.epochs,
+        "last_epoch": history[-1]["epoch"] if history else config.training.epochs,
         "last_train_loss": history[-1]["train"]["loss"] if history else None,
         "last_val_loss": history[-1]["val"]["loss"] if history and history[-1]["val"] else None,
         "best_checkpoint": str(run_dir / "best.pt") if best_epoch is not None else None,

@@ -101,7 +101,18 @@ class Experiment(models.Model):
     device = models.CharField(max_length=16, choices=DEVICE_CHOICES, default="auto")
     seed = models.IntegerField(default=42)
     amp = models.BooleanField(default=False, help_text="Automatic mixed precision.")
-    gradient_clip_norm = models.FloatField(null=True, blank=True)
+    gradient_clip_norm = models.FloatField(
+        null=True, blank=True, default=1.0,
+        help_text="Max gradient L2 norm (clipping). Stabilizes transformer detectors "
+                  "(RT-DETR / RF-DETR) against diverging to NaN loss; lower toward 0.1 "
+                  "if a model still diverges on epoch 1. Blank = no clipping.",
+    )
+    early_stopping_patience = models.PositiveIntegerField(
+        null=True, blank=True,
+        help_text="Stop a model's training after this many epochs with no validation-loss "
+                  "improvement (the best checkpoint is kept). Blank = train all epochs. "
+                  "Needs a val dataset.",
+    )
 
     optimizer_name = models.CharField(max_length=16, choices=OPTIMIZER_CHOICES, default="adamw")
     lr = models.FloatField(default=0.0001)

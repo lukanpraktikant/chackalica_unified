@@ -12,6 +12,8 @@ from django.core.exceptions import ValidationError
 from django.test import TestCase
 
 from fleet.models import Annotator, Dataset, FleetSettings
+from training import model_specs
+from training.forms import ExperimentModelForm
 from training.models import Experiment, ExperimentDataset, ExperimentModel
 from training.services import config_gen
 
@@ -133,3 +135,35 @@ class ConfigGenTests(TestCase):
         )
         with self.assertRaises(ValidationError):
             ed.clean()
+
+    def test_early_stopping_patience_flows_into_training_dict(self):
+        self.exp.early_stopping_patience = 10
+        self.exp.save()
+        data = config_gen.build_experiment_dict(self.exp, "/out/exp1")
+        self.assertEqual(data["training"]["early_stopping_patience"], 10)
+        # Blank means "train all epochs" — passed through as None.
+        self.exp.early_stopping_patience = None
+        self.exp.save()
+        data = config_gen.build_experiment_dict(self.exp, "/out/exp1")
+        self.assertIsNone(data["training"]["early_stopping_patience"])
+
+
+class RFDETRResolutionValidationTests(TestCase):
+    """The admin form must reject an RF-DETR resolution not divisible by 56."""
+
+    def _form(self, resolution):
+        rfield = model_specs.field_name(ExperimentModel.RFDETR, "resolution")
+        form = ExperimentModelForm(
+            data={"arch": ExperimentModel.RFDETR, "params": "{}", rfield: str(resolution)},
+            instance=ExperimentModel(),
+        )
+        return form, rfield
+
+    def test_rejects_non_multiple_of_56(self):
+        form, rfield = self._form(900)
+        self.assertFalse(form.is_valid())
+        self.assertIn(rfield, form.errors)
+
+    def test_accepts_multiple_of_56(self):
+        form, rfield = self._form(896)
+        self.assertTrue(form.is_valid(), form.errors)

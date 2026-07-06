@@ -56,7 +56,9 @@ ARCH_FIELD_SPECS: dict[str, list[dict]] = {
         },
         {
             "key": "resolution", "label": "Input resolution", "kind": "int",
-            "help": "Square input size. Blank = the variant's native resolution.",
+            "help": "Square input size. Must be divisible by 56 (the DINOv2 backbone's "
+                    "patch stride) — e.g. 560, 616, 672, 728, 784, 840, 896. A value that "
+                    "isn't will crash on epoch 1. Blank = the variant's native resolution.",
         },
         {
             "key": "score_threshold", "label": "Score threshold", "kind": "float",

@@ -102,6 +102,23 @@ class ExperimentModelForm(forms.ModelForm):
             "any matching keys here on save."
         )
 
+    def clean(self):
+        cleaned = super().clean()
+        arch = cleaned.get("arch") or ""
+        # RF-DETR's DINOv2 backbone needs the square input divisible by 56; a bad
+        # value only surfaces as an epoch-1 crash deep in the trainer, so reject it
+        # here at config time instead.
+        if arch == ExperimentModel.RFDETR:
+            fname = model_specs.field_name(ExperimentModel.RFDETR, "resolution")
+            resolution = cleaned.get(fname)
+            if resolution is not None and resolution % 56 != 0:
+                self.add_error(
+                    fname,
+                    f"RF-DETR resolution must be divisible by 56 (got {resolution}). "
+                    "Try 560, 616, 672, 728, 784, 840, or 896.",
+                )
+        return cleaned
+
     def save(self, commit=True):
         obj = super().save(commit=False)
         arch = self.cleaned_data.get("arch") or ""

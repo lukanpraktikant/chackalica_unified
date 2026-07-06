@@ -45,6 +45,7 @@ class TrainingConfig:
     seed: Optional[int] = None
     amp: bool = False
     gradient_clip_norm: Optional[float] = None
+    early_stopping_patience: Optional[int] = None
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
 
@@ -299,6 +300,12 @@ def _parse_training(value: Any) -> TrainingConfig:
         if gradient_clip_norm <= 0:
             raise ValueError("training.gradient_clip_norm must be greater than 0")
 
+    early_stopping_patience = value.get("early_stopping_patience")
+    if early_stopping_patience is not None:
+        early_stopping_patience = int(early_stopping_patience)
+        if early_stopping_patience <= 0:
+            raise ValueError("training.early_stopping_patience must be greater than 0")
+
     seed = value.get("seed")
     if seed is not None:
         seed = int(seed)
@@ -311,6 +318,7 @@ def _parse_training(value: Any) -> TrainingConfig:
         seed=seed,
         amp=bool(value.get("amp", False)),
         gradient_clip_norm=gradient_clip_norm,
+        early_stopping_patience=early_stopping_patience,
         optimizer=optimizer,
         scheduler=scheduler,
     )

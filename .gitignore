@@ -1,2 +1,5 @@
 # Local stack env (secrets/machine-specific). Commit .env.example instead.
 .env
+
+# Service operational logs (friendy_chachkalica/service.py -> logs/{train,eval,other}/)
+logs/
