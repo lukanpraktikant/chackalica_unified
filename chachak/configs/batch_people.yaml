@@ -1,0 +1,31 @@
+# Tiled people-first inference: fragment each frame into tiles, run the detector
+# per tile (better recall on small/distant people), lift person boxes back to the
+# full frame and de-dup, then crop each person from the ORIGINAL frame, run the
+# trained model, and remap labels to full-frame coords.
+pipeline: batch_people
+name: batch_people_demo
+
+model_checkpoint: /path/to/best.pt
+images: /path/to/images
+labels: /path/to/labels
+classes: [class_a, class_b]
+output_dir: runs/batch_people_demo
+
+device: auto
+infer_batch_size: 4
+num_workers: 4
+score_threshold: 0.001
+merge_nms_iou: 0.5
+
+tiling:
+  tile_size: 640
+  overlap: 0.2
+  nms_iou: 0.5
+
+detector:
+  checkpoint: /path/to/detector.pt
+  score_threshold: 0.5
+  person_class_name: person
+  expand_ratio: 0.0
+  nms_iou: 0.5                       # de-dup person boxes across overlapping tiles
+  min_box_size: 0.0

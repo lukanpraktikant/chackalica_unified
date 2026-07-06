@@ -1,0 +1,21 @@
+# Tiled (SAHI-style) inference: fragment each frame into overlapping tiles, run
+# the trained model per tile, remap detections to full-frame coords, NMS-merge.
+pipeline: batch_detect
+name: batch_detect_demo
+
+model_checkpoint: /path/to/best.pt
+images: /path/to/images
+labels: /path/to/labels
+classes: [class_a, class_b]        # list -> {0: class_a, 1: class_b}, or a {id: name} mapping
+output_dir: runs/batch_detect_demo
+
+device: auto
+infer_batch_size: 4                 # tiles per model forward pass
+num_workers: 4
+score_threshold: 0.001              # eval threshold (low, for PR curves)
+merge_nms_iou: 0.5
+
+tiling:
+  tile_size: 640                    # int (square) or [width, height]
+  overlap: 0.2                      # fraction, [0, 1)
+  nms_iou: 0.5                      # de-dup across tile seams

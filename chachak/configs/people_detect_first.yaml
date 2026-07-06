@@ -1,0 +1,26 @@
+# People-first inference: a detector checkpoint proposes person boxes, each is
+# cropped, the trained model runs on the crop, and labels are remapped to the
+# full frame.
+pipeline: people_detect_first
+name: people_detect_first_demo
+
+model_checkpoint: /path/to/best.pt
+images: /path/to/images
+labels: /path/to/labels
+classes: [class_a, class_b]
+output_dir: runs/people_detect_first_demo
+
+device: auto
+infer_batch_size: 4                 # crops per model forward pass
+num_workers: 4
+score_threshold: 0.001
+merge_nms_iou: 0.5
+
+detector:
+  checkpoint: /path/to/detector.pt  # your own trained detector
+  score_threshold: 0.5
+  person_class_name: person         # resolved against the detector's classes
+  # person_class_id: 0              # or pin the id directly (wins over name)
+  expand_ratio: 0.0                 # pad each person box outward before cropping
+  nms_iou: 0.5
+  min_box_size: 0.0                 # drop tiny final boxes (pixels)

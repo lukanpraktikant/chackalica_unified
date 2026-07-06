@@ -1,0 +1,190 @@
+"""Geometry for tiling, cropping, and remapping detections into full frames.
+
+A *tile* and a *crop* are the same thing: a sub-region of the frame at an
+``(x1, y1)`` pixel offset with its own local width/height. A detector run on that
+sub-region returns boxes normalized to the sub-region, and
+:func:`remap_local_preds_to_frame` lifts them back into full-frame normalized
+coordinates. That single remap serves the tiling pipeline, the person-crop
+pipeline, and the step that lifts detector person boxes from tile space to frame
+space, so all coordinate math lives here.
+
+Predictions are Friendy ``(N, 6)`` tensors: ``[x_center, y_center, width,
+height, confidence, class_id]`` with the box normalized to its own image.
+"""
+
+from typing import List, Sequence, Tuple
+
+import torch
+from torchvision.ops import batched_nms
+
+try:
+    from ._friendy import clip_xyxy, xyxy_to_xywhn
+except ImportError:  # run as a flat script
+    from _friendy import clip_xyxy, xyxy_to_xywhn
+
+
+def _as_wh(tile_size) -> Tuple[int, int]:
+    """Normalize a tile-size config value to ``(width, height)`` pixels."""
+    if isinstance(tile_size, (list, tuple)):
+        width, height = int(tile_size[0]), int(tile_size[1])
+    else:
+        width = height = int(tile_size)
+    if width <= 0 or height <= 0:
+        raise ValueError(f"tile_size must be positive, got {tile_size}")
+    return width, height
+
+
+def _xywhn_to_xyxy_tensor(boxes: torch.Tensor, width: int, height: int) -> torch.Tensor:
+    """Convert an ``(N, 4)`` normalized center-xywh tensor to absolute xyxy."""
+    if boxes.numel() == 0:
+        return boxes.reshape(-1, 4)
+    cx, cy, w, h = boxes.unbind(dim=1)
+    x1 = (cx - w / 2) * width
+    y1 = (cy - h / 2) * height
+    x2 = (cx + w / 2) * width
+    y2 = (cy + h / 2) * height
+    return torch.stack([x1, y1, x2, y2], dim=1)
+
+
+def xywhn_preds_to_xyxy(preds: torch.Tensor, width: int, height: int) -> torch.Tensor:
+    """Absolute xyxy pixel boxes ``(M, 4)`` from Friendy predictions ``(N, 6)``."""
+    if preds.numel() == 0:
+        return preds.new_zeros((0, 4))
+    return _xywhn_to_xyxy_tensor(preds[:, :4], width, height)
+
+
+def _tile_starts(total: int, size: int, stride: int) -> List[int]:
+    """Sliding-window start offsets covering ``[0, total)`` incl. the far edge."""
+    if size >= total:
+        return [0]
+    starts = list(range(0, total - size + 1, stride))
+    if starts[-1] != total - size:
+        starts.append(total - size)
+    return starts
+
+
+def tile_frame(
+    image: torch.Tensor,
+    tile_size,
+    overlap: float,
+) -> List[Tuple[torch.Tensor, Tuple[int, int], Tuple[int, int]]]:
+    """Split a CHW frame into overlapping tiles.
+
+    Returns a list of ``(tile_chw, (x1, y1), (tile_w, tile_h))``. Tiles are views
+    into ``image``. ``overlap`` is a fraction in ``[0, 1)``; the stride is
+    ``round(tile * (1 - overlap))``. The frame's right and bottom edges are always
+    covered by clamping the last tile flush to the border.
+    """
+    if not 0.0 <= overlap < 1.0:
+        raise ValueError(f"overlap must be in [0, 1), got {overlap}")
+    _, height, width = image.shape
+    tile_w, tile_h = _as_wh(tile_size)
+    tile_w = min(tile_w, width)
+    tile_h = min(tile_h, height)
+    stride_x = max(1, int(round(tile_w * (1.0 - overlap))))
+    stride_y = max(1, int(round(tile_h * (1.0 - overlap))))
+
+    tiles = []
+    for y in _tile_starts(height, tile_h, stride_y):
+        for x in _tile_starts(width, tile_w, stride_x):
+            tile = image[:, y : y + tile_h, x : x + tile_w]
+            tiles.append((tile, (x, y), (tile_w, tile_h)))
+    return tiles
+
+
+def expand_box(
+    box_xyxy: Sequence[float],
+    ratio: float,
+    frame_w: int,
+    frame_h: int,
+) -> List[float]:
+    """Pad an xyxy box outward by ``ratio`` (fraction of side), clipped to frame."""
+    x1, y1, x2, y2 = (float(v) for v in box_xyxy)
+    if ratio > 0:
+        dw = (x2 - x1) * ratio / 2.0
+        dh = (y2 - y1) * ratio / 2.0
+        x1, y1, x2, y2 = x1 - dw, y1 - dh, x2 + dw, y2 + dh
+    x1 = max(0.0, x1)
+    y1 = max(0.0, y1)
+    x2 = min(float(frame_w), x2)
+    y2 = min(float(frame_h), y2)
+    return [x1, y1, x2, y2]
+
+
+def crop_image(
+    image: torch.Tensor,
+    box_xyxy: Sequence[float],
+) -> Tuple[torch.Tensor, Tuple[int, int], Tuple[int, int]]:
+    """Crop a CHW frame to an xyxy box.
+
+    Returns ``(crop_chw, (x1, y1), (crop_w, crop_h))`` with integer pixel bounds
+    rounded and clamped inside the frame, mirroring :func:`tile_frame`'s shape.
+    """
+    _, height, width = image.shape
+    x1, y1, x2, y2 = (float(v) for v in box_xyxy)
+    ix1 = int(max(0, min(round(x1), width - 1)))
+    iy1 = int(max(0, min(round(y1), height - 1)))
+    ix2 = int(max(ix1 + 1, min(round(x2), width)))
+    iy2 = int(max(iy1 + 1, min(round(y2), height)))
+    crop = image[:, iy1:iy2, ix1:ix2]
+    return crop, (ix1, iy1), (ix2 - ix1, iy2 - iy1)
+
+
+def remap_local_preds_to_frame(
+    preds: torch.Tensor,
+    offset_xy: Tuple[int, int],
+    local_w: int,
+    local_h: int,
+    frame_w: int,
+    frame_h: int,
+) -> torch.Tensor:
+    """Lift local-region predictions ``(N, 6)`` into full-frame coordinates.
+
+    ``preds`` boxes are normalized to a region of size ``local_w x local_h`` at
+    pixel offset ``offset_xy``. Returns ``(N, 6)`` normalized to the full frame,
+    carrying confidence and class_id unchanged.
+    """
+    if preds.numel() == 0:
+        return preds.reshape(-1, 6)
+    boxes = _xywhn_to_xyxy_tensor(preds[:, :4], local_w, local_h)
+    offset = preds.new_tensor(
+        [offset_xy[0], offset_xy[1], offset_xy[0], offset_xy[1]]
+    )
+    boxes = boxes + offset
+    boxes = clip_xyxy(boxes, frame_w, frame_h)
+    xywhn = xyxy_to_xywhn(boxes, frame_w, frame_h)
+    return torch.cat([xywhn, preds[:, 4:6]], dim=1)
+
+
+def merge_predictions(
+    preds_list: Sequence[torch.Tensor],
+    frame_w: int,
+    frame_h: int,
+    nms_iou: float,
+    min_box_size: float = 0.0,
+) -> torch.Tensor:
+    """Concatenate per-region predictions and de-duplicate with per-class NMS.
+
+    All inputs are full-frame-normalized ``(N, 6)`` tensors (as produced by
+    :func:`remap_local_preds_to_frame`). ``min_box_size`` drops boxes whose pixel
+    width or height is below the threshold. Returns a single ``(M, 6)`` tensor.
+    """
+    preds = [p for p in preds_list if p is not None and p.numel() > 0]
+    if not preds:
+        return torch.zeros((0, 6))
+    preds = torch.cat(preds, dim=0)
+
+    boxes = _xywhn_to_xyxy_tensor(preds[:, :4], frame_w, frame_h)
+    if min_box_size > 0:
+        widths = boxes[:, 2] - boxes[:, 0]
+        heights = boxes[:, 3] - boxes[:, 1]
+        keep = (widths >= min_box_size) & (heights >= min_box_size)
+        preds = preds[keep]
+        boxes = boxes[keep]
+        if preds.numel() == 0:
+            return torch.zeros((0, 6))
+
+    scores = preds[:, 4]
+    classes = preds[:, 5].to(torch.int64)
+    keep = batched_nms(boxes, scores, classes, nms_iou)
+    return preds[keep]

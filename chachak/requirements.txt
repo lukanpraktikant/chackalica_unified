@@ -1,0 +1,4 @@
+# chachak reuses friendy_chachkalica's runtime (torch, torchvision, numpy,
+# pillow, pyyaml). The detector is just another registry-architecture checkpoint,
+# so no additional dependencies are needed.
+-r ../friendy_chachkalica/requirements.txt
