@@ -70,6 +70,13 @@ def evaluate_detection(
     for threshold in thresholds:
         ap_by_threshold[threshold] = {}
 
+    # Micro P/R/F1 are reported at the confidence that maximizes micro-F1: the
+    # AP sweep keeps every prediction down to score_threshold (typically 0.001),
+    # and at that cut precision is drowned in near-zero-confidence false
+    # positives. The same operating confidence is applied to the per-class
+    # precision/recall below; AP always integrates the full curve.
+    micro = _micro_stats(prepared_predictions, prepared_targets, iou_threshold=0.5)
+
     # box_iou between each prediction and its image's ground truth does not depend
     # on the IoU threshold, so precompute the best match per prediction once per
     # class and reuse it across every threshold.
@@ -79,15 +86,19 @@ def evaluate_detection(
             prepared_targets,
             class_id=class_id,
         )
+        gt_count_by_class[class_id] = precomputed['gt_count']
+        pred_count_by_class[class_id] = precomputed['pred_count']
         for threshold in thresholds:
-            stats = _class_stats_at_iou(precomputed, iou_threshold=threshold)
+            stats = _class_stats_at_iou(
+                precomputed,
+                iou_threshold=threshold,
+                score_cut=micro['f1_confidence'],
+            )
             ap_by_threshold[threshold][class_id] = stats['ap']
             if threshold == 0.5:
                 precision_by_class[class_id] = stats['precision']
                 recall_by_class[class_id] = stats['recall']
                 f1_by_class[class_id] = _f1(stats['precision'], stats['recall'])
-                gt_count_by_class[class_id] = stats['gt_count']
-                pred_count_by_class[class_id] = stats['pred_count']
 
     ap50_by_class = ap_by_threshold.get(0.5, {})
     ap5095_by_class = {
@@ -95,16 +106,24 @@ def evaluate_detection(
         for class_id in class_ids
     }
 
-    precision = _micro_precision(prepared_predictions, prepared_targets, iou_threshold=0.5)
-    recall = _micro_recall(prepared_predictions, prepared_targets, iou_threshold=0.5)
-    f1 = _f1(precision, recall)
+    # A class declared in the eval space but absent from the ground truth has a
+    # hard AP of 0, so averaging over it silently deflates mAP (a perfect
+    # detector on a dataset whose classes.txt lists unused classes scores < 1).
+    # The mAP means therefore only average classes with ground-truth instances;
+    # the rest stay visible in per_class with ground_truth_count=0.
+    classes_with_gt = [
+        class_id for class_id in class_ids if gt_count_by_class.get(class_id, 0) > 0
+    ]
 
     return {
-        'map50': _mean(ap50_by_class.values()),
-        'map50_95': _mean(ap5095_by_class.values()),
-        'precision': precision,
-        'recall': recall,
-        'f1': f1,
+        'map50': _mean([ap50_by_class[class_id] for class_id in classes_with_gt if class_id in ap50_by_class]),
+        'map50_95': _mean([ap5095_by_class[class_id] for class_id in classes_with_gt]),
+        'precision': micro['precision'],
+        'recall': micro['recall'],
+        'f1': micro['f1'],
+        'f1_confidence': micro['f1_confidence'],
+        'num_eval_classes': len(class_ids),
+        'num_eval_classes_with_gt': len(classes_with_gt),
         'num_images': len(targets),
         'num_predictions': int(sum(len(prediction['labels']) for prediction in prepared_predictions)),
         'num_targets': int(sum(len(target['labels']) for target in prepared_targets)),
@@ -317,6 +336,7 @@ def _precompute_class_matching(predictions, targets, class_id: int) -> Dict[str,
     image_index_per_pred = torch.cat(image_parts)
 
     order = torch.argsort(scores, descending=True, stable=True)
+    scores = scores[order]
     boxes = boxes[order]
     image_index_per_pred = image_index_per_pred[order]
     pred_count = int(scores.numel())
@@ -344,13 +364,18 @@ def _precompute_class_matching(predictions, targets, class_id: int) -> Dict[str,
     return {
         'pred_count': pred_count,
         'gt_count': gt_count,
+        'scores': scores,
         'best_iou': best_iou,
         'has_gt': has_gt,
         'keys': keys,
     }
 
 
-def _class_stats_at_iou(precomputed: Dict[str, Any], iou_threshold: float) -> Dict[str, Any]:
+def _class_stats_at_iou(
+    precomputed: Dict[str, Any],
+    iou_threshold: float,
+    score_cut: Optional[float] = None,
+) -> Dict[str, Any]:
     gt_count = precomputed['gt_count']
     pred_count = precomputed['pred_count']
     if pred_count == 0:
@@ -373,10 +398,26 @@ def _class_stats_at_iou(precomputed: Dict[str, Any], iou_threshold: float) -> Di
     precision_curve = tp_cumsum / torch.clamp(tp_cumsum + fp_cumsum, min=1e-12)
     recall_curve = tp_cumsum / max(gt_count, 1)
 
+    # Precision/recall are reported at the operating confidence (score_cut);
+    # AP always integrates the full curve. Matching is greedy in descending
+    # score order, so truncating low-confidence predictions cannot change which
+    # higher-scored prediction won each ground-truth box.
+    if score_cut is None:
+        cut = pred_count
+    else:
+        cut = int((precomputed['scores'] >= float(score_cut)).sum())
+
+    if cut == 0:
+        precision = 0.0
+        recall = 0.0
+    else:
+        precision = float(precision_curve[cut - 1].item())
+        recall = float(recall_curve[cut - 1].item()) if gt_count > 0 else 0.0
+
     return {
         'ap': _average_precision(recall_curve, precision_curve) if gt_count > 0 else 0.0,
-        'precision': float(precision_curve[-1].item()),
-        'recall': float(recall_curve[-1].item()) if gt_count > 0 else 0.0,
+        'precision': precision,
+        'recall': recall,
         'gt_count': gt_count,
         'pred_count': pred_count,
     }
@@ -400,47 +441,68 @@ def _first_occurrence_mask(keys: torch.Tensor) -> torch.Tensor:
     return mask
 
 
-def _micro_precision(predictions, targets, iou_threshold: float) -> float:
-    tp, fp, _ = _micro_counts(predictions, targets, iou_threshold)
-    return float(tp / max(tp + fp, 1))
+def _micro_stats(predictions, targets, iou_threshold: float) -> Dict[str, Any]:
+    """Micro precision/recall/F1 at the confidence that maximizes micro-F1.
 
-
-def _micro_recall(predictions, targets, iou_threshold: float) -> float:
-    tp, _, gt = _micro_counts(predictions, targets, iou_threshold)
-    return float(tp / max(gt, 1))
-
-
-def _micro_counts(predictions, targets, iou_threshold: float) -> tuple[int, int, int]:
+    Every prediction gets a TP/FP verdict by greedy same-label matching in
+    descending-score order (mismatched labels are masked to -1 IoU so they can
+    never match). Because matching is greedy by score, a prediction's verdict
+    does not depend on where a confidence cut lands, so the whole P/R curve can
+    be swept once and the best-F1 operating point picked from it.
+    """
     gt_total = int(sum(len(target['labels']) for target in targets))
-    total_predictions = 0
-    tp = 0
+    scores_parts = []
+    tp_parts = []
 
     for prediction, target in zip(predictions, targets):
         num_predictions = int(prediction['labels'].numel())
-        total_predictions += num_predictions
-        if num_predictions == 0 or target['labels'].numel() == 0:
+        if num_predictions == 0:
             continue
 
         order = torch.argsort(prediction['scores'], descending=True, stable=True)
-        pred_labels = prediction['labels'][order]
-        pred_boxes = prediction['boxes'][order]
+        scores_sorted = prediction['scores'][order]
+        tp_flags = torch.zeros((num_predictions,), dtype=torch.bool)
 
-        # For each prediction pick the best same-label ground-truth box. Masking
-        # mismatched labels to -1 keeps them below any positive IoU threshold, so
-        # they can never be selected as a match.
-        ious = box_iou(pred_boxes, target['boxes'])
-        label_match = pred_labels[:, None] == target['labels'][None, :]
-        masked = torch.where(label_match, ious, ious.new_full((), -1.0))
-        best_iou, best_gt = torch.max(masked, dim=1)
+        if target['labels'].numel() > 0:
+            pred_labels = prediction['labels'][order]
+            pred_boxes = prediction['boxes'][order]
+            ious = box_iou(pred_boxes, target['boxes'])
+            label_match = pred_labels[:, None] == target['labels'][None, :]
+            masked = torch.where(label_match, ious, ious.new_full((), -1.0))
+            best_iou, best_gt = torch.max(masked, dim=1)
 
-        valid = best_iou >= iou_threshold
-        if bool(valid.any()):
-            valid_index = valid.nonzero(as_tuple=False).flatten()
-            first_local = _first_occurrence_mask(best_gt[valid_index])
-            tp += int(first_local.sum())
+            valid = best_iou >= iou_threshold
+            if bool(valid.any()):
+                valid_index = valid.nonzero(as_tuple=False).flatten()
+                first_local = _first_occurrence_mask(best_gt[valid_index])
+                tp_flags[valid_index[first_local]] = True
 
-    fp = total_predictions - tp
-    return tp, fp, gt_total
+        scores_parts.append(scores_sorted)
+        tp_parts.append(tp_flags)
+
+    if not scores_parts:
+        return {'precision': 0.0, 'recall': 0.0, 'f1': 0.0, 'f1_confidence': None}
+
+    scores = torch.cat(scores_parts)
+    tp_flags = torch.cat(tp_parts)
+    order = torch.argsort(scores, descending=True, stable=True)
+    scores = scores[order]
+    tp_cumsum = torch.cumsum(tp_flags[order].float(), dim=0)
+    counts = torch.arange(1, scores.numel() + 1, dtype=torch.float32)
+    precision_curve = tp_cumsum / counts
+    recall_curve = tp_cumsum / max(gt_total, 1)
+    f1_curve = (
+        2 * precision_curve * recall_curve
+        / torch.clamp(precision_curve + recall_curve, min=1e-12)
+    )
+    best = int(torch.argmax(f1_curve))
+
+    return {
+        'precision': float(precision_curve[best].item()),
+        'recall': float(recall_curve[best].item()),
+        'f1': float(f1_curve[best].item()),
+        'f1_confidence': float(scores[best].item()),
+    }
 
 
 def box_iou(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:

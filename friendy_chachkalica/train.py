@@ -24,6 +24,12 @@ except ImportError:
     from registry import build_model
 
 
+# What best-checkpoint selection tracks; stamped into checkpoints so a resume
+# can tell whether a stored best_score is comparable (older checkpoints tracked
+# val loss, where lower was better).
+BEST_METRIC = "val_map50_95"
+
+
 def train_from_config(
     config_path: str | Path,
     evaluate_after_train: bool = True,
@@ -218,10 +224,23 @@ def train_model(
         history = list(state.get("history") or [])
         best_score = state.get("best_score")
         best_epoch = _best_epoch_from_history(history)
+        if best_score is not None and state.get("best_metric") != BEST_METRIC:
+            # Older checkpoints tracked best_score as val loss (lower is
+            # better); comparing a mAP against it would never update the best.
+            print(
+                f"[train] Resume: checkpoint tracked best_score as val loss, "
+                f"now selecting on {BEST_METRIC}; restarting best-model tracking"
+            )
+            best_score = None
+            best_epoch = None
+        # Restore the early-stopping counter, otherwise a resumed run gets up
+        # to `patience` extra epochs before stopping.
+        epochs_without_improvement = _epochs_since_best(history, best_epoch)
         start_epoch = int(state.get("epoch", 0)) + 1
         print(
             f"[train] Resumed run {run_name} at epoch {start_epoch}/{config.training.epochs} "
-            f"(best_score={best_score} best_epoch={best_epoch})"
+            f"(best_score={best_score} best_epoch={best_epoch} "
+            f"epochs_without_improvement={epochs_without_improvement})"
         )
 
     for epoch in range(start_epoch, config.training.epochs + 1):
@@ -236,6 +255,7 @@ def train_model(
         )
 
         val_summary = None
+        val_map_summary = None
         if val_loader is not None:
             print(f"[train] Run {run_name} epoch {epoch}: evaluating validation loss")
             val_summary = evaluate_loss(
@@ -246,12 +266,28 @@ def train_model(
                 source_classes=run.val_dataset.classes if run.val_dataset is not None else None,
                 model_classes=train_dataset_config.classes,
             )
+            print(f"[train] Run {run_name} epoch {epoch}: evaluating validation mAP")
+            val_map_summary = evaluate_map(
+                adapter,
+                val_loader,
+                device,
+                config=config,
+                prediction_classes=train_dataset_config.classes,
+                target_classes=(
+                    run.val_dataset.classes
+                    if run.val_dataset is not None
+                    else train_dataset_config.classes
+                ),
+            )
 
         if scheduler is not None:
             scheduler.step()
 
-        score = val_summary["loss"] if val_summary is not None else None
-        is_best = score is not None and (best_score is None or score < best_score)
+        # The best checkpoint is selected on val mAP50-95 (higher is better),
+        # not val loss: the summed loss mixes objectness/cls/box terms and
+        # routinely diverges from detection quality.
+        score = val_map_summary["map50_95"] if val_map_summary is not None else None
+        is_best = score is not None and (best_score is None or score > best_score)
         if is_best:
             best_score = score
             best_epoch = epoch
@@ -262,6 +298,9 @@ def train_model(
             "epoch": epoch,
             "train": train_summary,
             "val": val_summary,
+            # Compact subset only: the full metrics dict (per_class etc.) would
+            # bloat history.yaml and every checkpoint.
+            "val_map": _compact_map_summary(val_map_summary),
             "lr": _current_lr(optimizer),
             "is_best": is_best,
         }
@@ -277,6 +316,7 @@ def train_model(
             "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
             "scaler_state_dict": scaler.state_dict() if scaler is not None else None,
             "best_score": best_score,
+            "best_metric": BEST_METRIC,
             "history": history,
         }
         save_checkpoint(checkpoint, run_dir / "last.pt")
@@ -290,10 +330,11 @@ def train_model(
             f"[train] Run {run_name} epoch {epoch} done: "
             f"train_loss={train_summary.get('loss')} "
             f"val_loss={val_summary.get('loss') if val_summary else None} "
+            f"val_map50_95={val_map_summary.get('map50_95') if val_map_summary else None} "
             f"lr={_current_lr(optimizer)} best={is_best}"
         )
 
-        # Early stopping: once val loss hasn't improved for `patience` epochs, stop
+        # Early stopping: once val mAP hasn't improved for `patience` epochs, stop
         # — the best.pt checkpoint already holds the best epoch, so continuing just
         # overfits. Only active when a val set produced a score.
         patience = config.training.early_stopping_patience
@@ -301,7 +342,7 @@ def train_model(
             print(
                 f"[train] Run {run_name} early stopping at epoch {epoch}: no val "
                 f"improvement for {epochs_without_improvement} epoch(s) "
-                f"(best epoch {best_epoch}, best_loss={best_score})"
+                f"(best epoch {best_epoch}, best_val_map50_95={best_score})"
             )
             break
 
@@ -339,7 +380,8 @@ def train_model(
         "run_name": run_name,
         "run_dir": str(run_dir),
         "best_epoch": best_epoch,
-        "best_loss": best_score,
+        "best_val_map50_95": best_score,
+        "best_loss": _val_loss_at_epoch(history, best_epoch),
         "last_epoch": history[-1]["epoch"] if history else config.training.epochs,
         "last_train_loss": history[-1]["train"]["loss"] if history else None,
         "last_val_loss": history[-1]["val"]["loss"] if history and history[-1]["val"] else None,
@@ -425,6 +467,46 @@ def evaluate_loss(
         _accumulate_losses(loss_totals, loss_items, batch_size)
 
     return _summarize_losses(total_loss, total_images, loss_totals)
+
+
+@torch.no_grad()
+def evaluate_map(
+    adapter: Any,
+    loader: DataLoader,
+    device: torch.device,
+    config: ExperimentConfig,
+    prediction_classes: Optional[Dict[int, str]] = None,
+    target_classes: Optional[Dict[int, str]] = None,
+) -> Dict[str, Any]:
+    """Predict over a loader and compute detection metrics (no files written).
+
+    Used for per-epoch validation so best-checkpoint selection and early
+    stopping can track val mAP instead of val loss. Predictions are remapped by
+    class name onto ``target_classes``, mirroring ``predict_dataset``.
+    """
+    was_training = adapter.model.training
+    adapter.eval()
+    all_predictions = []
+    all_targets = []
+    try:
+        for images, targets in loader:
+            images, targets = _move_batch_to_device(images, targets, device)
+            predictions = _predict_with_config(adapter, images, config)
+            for target, prediction in zip(targets, predictions):
+                all_predictions.append(prediction.detach().cpu())
+                all_targets.append(_target_to_cpu(target))
+    finally:
+        adapter.train(was_training)
+
+    return evaluate_detection(
+        all_predictions,
+        all_targets,
+        iou_thresholds=config.evaluation.iou_thresholds,
+        score_threshold=config.evaluation.score_threshold,
+        prediction_classes=prediction_classes,
+        target_classes=target_classes,
+        eval_classes=target_classes,
+    )
 
 
 @torch.no_grad()
@@ -714,6 +796,34 @@ def _best_epoch_from_history(history: List[Dict[str, Any]]) -> Optional[int]:
         if entry.get("is_best"):
             best_epoch = entry.get("epoch", best_epoch)
     return best_epoch
+
+
+def _epochs_since_best(history: List[Dict[str, Any]], best_epoch: Optional[int]) -> int:
+    """Scored epochs after ``best_epoch`` — the resumed early-stopping counter."""
+    if best_epoch is None:
+        return 0
+    return sum(
+        1
+        for entry in history
+        if (entry.get("val_map") or entry.get("val")) is not None
+        and entry.get("epoch", 0) > best_epoch
+    )
+
+
+def _val_loss_at_epoch(history: List[Dict[str, Any]], epoch: Optional[int]) -> Optional[float]:
+    if epoch is None:
+        return None
+    for entry in history:
+        if entry.get("epoch") == epoch and entry.get("val"):
+            return entry["val"].get("loss")
+    return None
+
+
+def _compact_map_summary(metrics: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if metrics is None:
+        return None
+    keys = ("map50", "map50_95", "precision", "recall", "f1", "f1_confidence", "num_targets")
+    return {key: metrics.get(key) for key in keys}
 
 
 def _to_builtin(value: Any) -> Any:

@@ -67,6 +67,7 @@ def ingest_run(run) -> dict:
             train_dataset_name=entry.get("train_dataset") or "",
             best_epoch=entry.get("best_epoch"),
             best_loss=entry.get("best_loss"),
+            error=entry.get("error") or "",
             run_dir=entry.get("run_dir") or "",
             best_checkpoint=entry.get("best_checkpoint") or "",
             last_checkpoint=entry.get("last_checkpoint") or "",

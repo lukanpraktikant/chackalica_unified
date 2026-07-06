@@ -79,7 +79,16 @@ def eval_checkpoint(
     model_config = state.get("model_config", {}) or {}
     num_classes = model_config.get("num_classes")
     params = dict(model_config.get("params", {}) or {})
-    train_classes = _as_class_map(state.get("train_dataset", {}).get("classes", classes))
+    train_classes_raw = (state.get("train_dataset") or {}).get("classes")
+    if not train_classes_raw:
+        # Falling back to the eval class list would silently mislabel every
+        # prediction whenever the model's training class order differs from it.
+        raise ValueError(
+            f"Checkpoint {checkpoint_path} does not record its training class names "
+            "(train_dataset.classes), so predictions cannot be remapped by name onto "
+            "the eval classes. Re-train (or re-save the checkpoint) with class names."
+        )
+    train_classes = _as_class_map(train_classes_raw)
     eval_classes = _as_class_map(classes)
 
     output_dir = Path(output_dir)

@@ -28,6 +28,11 @@ x-app: &app
     POSTGRES_PASSWORD: fleet
     REDIS_URL: redis://redis:6379/0
     DJANGO_DEBUG: "true"
+    # Internal RD box reached from other machines on the LAN. Wildcard is fine
+    # here (DEBUG dev box); tighten for anything internet-facing. CSRF needs
+    # explicit scheme+host origins (no bare '*') for the admin login POST.
+    DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-*}
+    DJANGO_CSRF_TRUSTED_ORIGINS: ${DJANGO_CSRF_TRUSTED_ORIGINS:-http://10.10.155.12:9000,http://10.10.80.67:9000,http://localhost:9000}
     # Containers reach the host-published webhook + Label Studio via the gateway.
     FLEET_LS_HOST: host.docker.internal
     # The worker provisions sibling Label Studio containers via the host docker
@@ -56,8 +61,10 @@ services:
       POSTGRES_DB: fleet
       POSTGRES_USER: fleet
       POSTGRES_PASSWORD: fleet
+    # Host 5432 is already taken by another stack on this box; publish on 5433.
+    # In-network clients still reach it as `postgres:5432`.
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - fleet-postgres:/var/lib/postgresql/data
     healthcheck:
@@ -95,8 +102,11 @@ services:
     # PyTorch DataLoader workers pass image batches through /dev/shm; Docker's
     # default 64 MB is far too small. Bump higher for many workers / large batches.
     shm_size: ${FC_SHM_SIZE:-2gb}
+    # Host 8200 is taken by another stack (openbao) on this box; publish on 8201.
+    # The container still listens on FC_PORT (8200), which is what Django targets
+    # in-network via TRAINING_SERVICE_URL=http://trainer:8200.
     ports:
-      - "${FC_PORT:-8200}:${FC_PORT:-8200}"
+      - "${FC_HOST_PORT:-8201}:${FC_PORT:-8200}"
     volumes:
       # Same host data dir at the same container path as web/worker — see the
       # SHARED FILESYSTEM note above. source/ is a read-only input subtree.
@@ -105,15 +115,15 @@ services:
     restart: unless-stopped
 
     # ───────────────────────────────── GPU ─────────────────────────────────
-    # Requires the NVIDIA Container Toolkit on the host. Uncomment to expose the
-    # GPU(s); without it, device 'auto' falls back to CPU.
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
+    # Requires the NVIDIA Container Toolkit on the host. Exposes the GPU(s);
+    # without it, device 'auto' falls back to CPU.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 
 volumes:
   fleet-postgres:

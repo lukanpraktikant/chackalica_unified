@@ -301,6 +301,10 @@ class RunResult(models.Model):
     best_checkpoint = models.CharField(max_length=1024, blank=True)
     last_checkpoint = models.CharField(max_length=1024, blank=True)
 
+    # The trainer's error string for a model that failed to train (results.yaml
+    # entries with an "error" key). Empty for successful runs.
+    error = models.TextField(blank=True, default="")
+
     val_metrics = models.JSONField(null=True, blank=True)
     test_metrics = models.JSONField(null=True, blank=True)
 

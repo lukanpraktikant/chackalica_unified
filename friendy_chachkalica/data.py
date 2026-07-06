@@ -27,7 +27,16 @@ def _resolve_image_dir(images_root):
 
 def _image_to_label_path(image_path, images_root, labels_root):
     relative_path = image_path.relative_to(images_root)
-    return (labels_root / relative_path).with_suffix(".txt")
+    # Two label-naming conventions occur in practice: "<stem>.txt" (drop the
+    # image suffix, e.g. frame_000.txt) and "<image filename>.txt" (append,
+    # e.g. frame_000.jpg.txt). Prefer the appended form when it exists on disk,
+    # otherwise fall back to the stripped form (also the not-found default, so
+    # callers that only test .exists() behave as before).
+    stripped = (labels_root / relative_path).with_suffix(".txt")
+    appended = labels_root / relative_path.parent / (relative_path.name + ".txt")
+    if appended.exists() and not stripped.exists():
+        return appended
+    return stripped
 
 
 def _read_yolo_label_file(label_path, image_width, image_height):
@@ -64,6 +73,35 @@ def _read_yolo_label_file(label_path, image_width, image_height):
     return boxes, labels
 
 
+def _scan_label_file(label_path, valid_class_ids):
+    """Count label lines with out-of-range class ids or clearly unnormalized coords.
+
+    Mirrors ``_read_yolo_label_file``'s parsing so it only inspects lines that
+    would actually produce a box. Coordinates are flagged when far outside
+    [0, 1] (i.e. pixel coordinates in a file that must be normalized); for the
+    5-value OBB form the trailing angle is exempt from the range check.
+    """
+    bad_class_lines = 0
+    unnormalized_lines = 0
+    valid_class_ids = set(valid_class_ids)
+    with open(label_path) as file:
+        for line in file:
+            parts = line.strip().split()
+            if len(parts) < 5:
+                continue
+            try:
+                class_id = int(float(parts[0]))
+                values = [float(value) for value in parts[1:]]
+            except ValueError:
+                continue
+            if class_id not in valid_class_ids:
+                bad_class_lines += 1
+            coords = values[:4] if len(values) == 5 else values
+            if any(value < -0.5 or value > 1.5 for value in coords):
+                unnormalized_lines += 1
+    return bad_class_lines, unnormalized_lines
+
+
 def _normalized_polygon_to_xyxy(points, image_width, image_height):
     xs = points[0::2]
     ys = points[1::2]
@@ -75,7 +113,7 @@ def _normalized_polygon_to_xyxy(points, image_width, image_height):
 
 
 class YoloDetectionDataset:
-    def __init__(self, images_dir, labels_dir, classes, transforms=None):
+    def __init__(self, images_dir, labels_dir, classes, transforms=None, require_labels=False):
         self.transforms = transforms
         self.images_root = Path(images_dir).resolve()
         self.labels_root = Path(labels_dir).resolve()
@@ -85,15 +123,50 @@ class YoloDetectionDataset:
         if not self.labels_root.is_dir():
             raise FileNotFoundError(f"Could not resolve labels directory: {self.labels_root}")
 
-        label_count = sum(
-            1
-            for image_path in self.image_paths
-            if _image_to_label_path(image_path, self.images_root, self.labels_root).exists()
-        )
+        label_count = 0
+        bad_class_lines = 0
+        unnormalized_lines = 0
+        for image_path in self.image_paths:
+            label_path = _image_to_label_path(image_path, self.images_root, self.labels_root)
+            if not label_path.exists():
+                continue
+            label_count += 1
+            bad_classes, unnormalized = _scan_label_file(label_path, self.names)
+            bad_class_lines += bad_classes
+            unnormalized_lines += unnormalized
         print(
             f"[data] Dataset ready: images={len(self.image_paths)} labels_found={label_count} "
             f"classes={len(self.names)} images_root={self.images_root} labels_root={self.labels_root}"
         )
+        # Both anomalies below corrupt training/eval without crashing, so call
+        # them out once per dataset instead of failing silently per line.
+        if bad_class_lines:
+            print(
+                f"[data] WARNING: {bad_class_lines} label line(s) use class ids outside the "
+                f"{len(self.names)} configured classes. Those boxes will crash training or be "
+                f"silently dropped from eval — check that the class list matches how the "
+                f"labels were exported (e.g. 0-based vs 1-based ids)."
+            )
+        if unnormalized_lines:
+            print(
+                f"[data] WARNING: {unnormalized_lines} label line(s) have coordinates far "
+                f"outside [0, 1]. Labels must be normalized YOLO xywh; pixel-coordinate "
+                f"labels produce garbage boxes without crashing."
+            )
+        # Zero labels found almost always means a path/naming mismatch, not a
+        # dataset that is genuinely all-background. For eval sets this silently
+        # produces meaningless loss/mAP (every prediction scored against empty
+        # ground truth), so fail loud. Train tolerates it with a warning.
+        if label_count == 0:
+            message = (
+                f"No labels matched any of {len(self.image_paths)} images under "
+                f"{self.labels_root} (checked both '<stem>.txt' and "
+                f"'<image>.txt' naming). Check the labels directory and filename "
+                f"convention."
+            )
+            if require_labels:
+                raise FileNotFoundError(message)
+            print(f"[data] WARNING: {message}")
 
     def __len__(self):
         return len(self.image_paths)
@@ -137,7 +210,7 @@ def detection_collate_fn(batch):
     return list(images), list(targets)
 
 
-def build_dataset(dataset_config: DatasetConfig) -> YoloDetectionDataset:
+def build_dataset(dataset_config: DatasetConfig, require_labels: bool = False) -> YoloDetectionDataset:
     print(
         f"[data] Building dataset name={dataset_config.name} role={dataset_config.role} "
         f"classes={len(dataset_config.classes)}"
@@ -146,6 +219,7 @@ def build_dataset(dataset_config: DatasetConfig) -> YoloDetectionDataset:
         images_dir=dataset_config.images,
         labels_dir=dataset_config.labels,
         classes=dataset_config.classes,
+        require_labels=require_labels,
     )
 
 
@@ -181,7 +255,9 @@ def build_eval_dataloader(
     if num_workers is None:
         num_workers = config.training.num_workers
 
-    dataset = build_dataset(dataset_config)
+    # Eval requires labels: a val/test set with none makes every loss and mAP
+    # meaningless, so surface it as a hard error instead of "training complete".
+    dataset = build_dataset(dataset_config, require_labels=True)
     print(
         f"[data] Building eval dataloader dataset={dataset_config.name} "
         f"batch_size={batch_size} workers={num_workers} shuffle=False"

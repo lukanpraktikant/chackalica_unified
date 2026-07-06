@@ -155,7 +155,7 @@ class RunResultInline(admin.TabularInline):
     extra = 0
     can_delete = False
     fields = ["run_name", "model_arch", "train_dataset_name", "map50", "map50_95",
-              "best_epoch", "best_checkpoint"]
+              "best_epoch", "best_checkpoint", "error"]
     readonly_fields = fields
 
     def has_add_permission(self, request, obj=None):
@@ -291,7 +291,7 @@ class TrainingRunAdmin(admin.ModelAdmin):
 @admin.register(RunResult)
 class RunResultAdmin(admin.ModelAdmin):
     list_display = ["run_name", "run", "model_arch", "train_dataset_name",
-                    "map50", "map50_95", "best_epoch"]
+                    "map50", "map50_95", "best_epoch", "error"]
     list_filter = ["model_arch", "train_dataset_name"]
     search_fields = ["run_name", "train_dataset_name"]
     actions = ["show_best_epoch_stats", "promote_selected"]
