@@ -198,7 +198,7 @@ def train_model(
 
     optimizer = build_optimizer(adapter.model.parameters(), config)
     scheduler = build_scheduler(optimizer, config)
-    scaler = _build_grad_scaler(config, device)
+    scaler = _build_grad_scaler(config, device, adapter)
     print(
         f"[train] Optimizer={config.training.optimizer.name} lr={config.training.optimizer.lr} "
         f"scheduler={config.training.scheduler.name} amp={scaler is not None}"
@@ -412,7 +412,7 @@ def train_one_epoch(
         images, targets = _move_batch_to_device(images, targets, device)
         optimizer.zero_grad(set_to_none=True)
 
-        with _autocast_context(config, device):
+        with _autocast_context(config, device, adapter):
             loss, loss_items = adapter.training_step(images, targets)
 
         if scaler is not None:
@@ -459,7 +459,7 @@ def evaluate_loss(
         images, targets = _move_batch_to_device(images, targets, device)
         targets = _remap_targets_to_model_classes(targets, source_classes, model_classes)
         loss_step = getattr(adapter, "validation_step", adapter.training_step)
-        with _autocast_context(config, device):
+        with _autocast_context(config, device, adapter):
             loss, loss_items = loss_step(images, targets)
         batch_size = len(images)
         total_loss += float(loss.detach().cpu()) * batch_size
@@ -735,15 +735,24 @@ def _set_seed(seed: int) -> None:
 def _build_grad_scaler(
     config: ExperimentConfig,
     device: torch.device,
+    adapter: Any,
 ) -> Optional[torch.amp.GradScaler]:
-    if not config.training.amp or device.type != "cuda":
+    if not _amp_enabled(config, device, adapter):
         return None
     return torch.amp.GradScaler("cuda")
 
 
-def _autocast_context(config: ExperimentConfig, device: torch.device):
-    enabled = config.training.amp and device.type == "cuda"
+def _autocast_context(config: ExperimentConfig, device: torch.device, adapter: Any):
+    enabled = _amp_enabled(config, device, adapter)
     return torch.amp.autocast(device_type=device.type, enabled=enabled)
+
+
+def _amp_enabled(config: ExperimentConfig, device: torch.device, adapter: Any) -> bool:
+    return (
+        config.training.amp
+        and device.type == "cuda"
+        and getattr(adapter, "supports_amp", True)
+    )
 
 
 def _accumulate_losses(

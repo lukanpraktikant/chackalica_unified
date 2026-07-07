@@ -24,6 +24,9 @@ class RTDETRAdapter:
     input_max_size: Optional[int] = 640
     input_size_multiple: int = 32
     name: str = "rtdetr"
+    # HF RT-DETR overflows to NaN under fp16 autocast (decoder + GIoU loss),
+    # so the trainer must always run this adapter in full precision.
+    supports_amp: bool = False
 
     def to(self, device):
         self.model.to(device)
