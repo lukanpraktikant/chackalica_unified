@@ -4,7 +4,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("training", "0007_experiment_early_stopping_patience_and_more"),
+        ("training", "0008_experimentdataset_augmentations"),
     ]
 
     operations = [

@@ -19,6 +19,8 @@ Endpoints:
     POST /runs/{run_id}/stop  -> {run_id, status, outcome} (gracefully terminate a running train)
     POST /eval                -> {eval_id, status, pid}   (body: {eval_id, request_path})
     GET  /evals/{eval_id}     -> {eval_id, status, returncode, started_at, finished_at, log_tail}
+    POST /pipeline            -> {pipeline_id, status, pid} (body: {pipeline_id, request_path})
+    GET  /pipelines/{id}      -> {pipeline_id, status, returncode, started_at, finished_at, log_tail}
 
 Operational logging (what the service itself does — launches, stops, rejections,
 errors) is written under ``<repo_root>/logs/``, split three ways: ``train/`` (one
@@ -52,6 +54,7 @@ MAX_CONCURRENT = int(os.environ.get("FC_MAX_CONCURRENT", "1"))
 LOGS_DIR = Path(os.environ.get("FC_LOGS_DIR", HERE.parent / "logs"))
 TRAIN_LOG_DIR = LOGS_DIR / "train"
 EVAL_LOG_DIR = LOGS_DIR / "eval"
+PIPELINE_LOG_DIR = LOGS_DIR / "pipeline"
 OTHER_LOG_DIR = LOGS_DIR / "other"
 _LOG_FMT = "%(asctime)s [%(name)s] %(levelname)s %(message)s"
 
@@ -64,7 +67,7 @@ def _configure_logging() -> None:
     for the shared console output. ``fc`` itself does not propagate, so records
     don't get duplicated by uvicorn's root logger.
     """
-    for d in (TRAIN_LOG_DIR, EVAL_LOG_DIR, OTHER_LOG_DIR):
+    for d in (TRAIN_LOG_DIR, EVAL_LOG_DIR, PIPELINE_LOG_DIR, OTHER_LOG_DIR):
         d.mkdir(parents=True, exist_ok=True)
     root = logging.getLogger("fc")
     root.setLevel(logging.INFO)
@@ -105,6 +108,10 @@ def _eval_log(eval_id: int) -> logging.Logger:
     return _logger(f"fc.eval.{eval_id}", EVAL_LOG_DIR / f"eval-{eval_id}.log")
 
 
+def _pipeline_log(pipeline_id: int) -> logging.Logger:
+    return _logger(f"fc.pipeline.{pipeline_id}", PIPELINE_LOG_DIR / f"pipeline-{pipeline_id}.log")
+
+
 _configure_logging()
 
 app = FastAPI(title="friendy_chachkalica trainer")
@@ -123,6 +130,11 @@ class TrainRequest(BaseModel):
 
 class EvalRequest(BaseModel):
     eval_id: int
+    request_path: str
+
+
+class PipelineRequest(BaseModel):
+    pipeline_id: int
     request_path: str
 
 
@@ -331,6 +343,54 @@ def eval_status(eval_id: int):
     if job is None:
         raise HTTPException(status_code=404, detail="unknown eval_id")
     return {"eval_id": eval_id, **_status_payload(job)}
+
+
+@app.post("/pipeline")
+def run_pipeline(req: PipelineRequest):
+    """Run a chachak inference/eval pipeline against a generated request YAML.
+
+    chachak lives beside this package (``<repo_root>/chachak``) and shares this
+    torch/CUDA environment; ``run.py`` bootstraps its own imports, so we spawn it
+    exactly like the eval subprocess.
+    """
+    log = _pipeline_log(req.pipeline_id)
+    request_path = Path(req.request_path)
+    if not request_path.exists():
+        log.error("pipeline rejected: request not found: %s", request_path)
+        raise HTTPException(status_code=400, detail=f"pipeline request not found: {request_path}")
+
+    with _lock:
+        key = f"pipeline-{req.pipeline_id}"
+        existing = _jobs.get(key)
+        if existing and _job_status(existing) == "running":
+            log.info("pipeline already running (pid=%s); ignoring duplicate launch",
+                     existing["pid"])
+            return {"pipeline_id": req.pipeline_id, "status": "running", "pid": existing["pid"]}
+        if _active_count() >= MAX_CONCURRENT:
+            log.warning("pipeline rejected: trainer busy (%d active >= %d max)",
+                        _active_count(), MAX_CONCURRENT)
+            raise HTTPException(status_code=409, detail="trainer busy: another job is active")
+
+        try:
+            output_dir = Path(yaml.safe_load(request_path.read_text())["output_dir"])
+        except Exception as exc:  # noqa: BLE001
+            log.error("pipeline rejected: bad request %s: %s", request_path, exc)
+            raise HTTPException(status_code=400, detail=f"bad pipeline request: {exc}")
+
+        chachak_run = HERE.parent / "chachak" / "run.py"
+        cmd = [sys.executable, str(chachak_run), str(request_path)]
+        job = _spawn(key, cmd, output_dir)
+        log.info("launched pipeline: pid=%s request=%s output_dir=%s",
+                 job["pid"], request_path, output_dir)
+        return {"pipeline_id": req.pipeline_id, "status": "running", "pid": job["pid"]}
+
+
+@app.get("/pipelines/{pipeline_id}")
+def pipeline_status(pipeline_id: int):
+    job = _jobs.get(f"pipeline-{pipeline_id}")
+    if job is None:
+        raise HTTPException(status_code=404, detail="unknown pipeline_id")
+    return {"pipeline_id": pipeline_id, **_status_payload(job)}
 
 
 if __name__ == "__main__":

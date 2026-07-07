@@ -13,6 +13,9 @@ class DatasetConfig:
     classes: Dict[int, str]
     role: str
     weight: float = 1.0
+    # Per-augmentation fraction of samples to augment each epoch, e.g.
+    # {"hflip": 0.5, "scale_crop": 0.3}. Only honored for role="train".
+    augmentation: Dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -205,10 +208,13 @@ def _parse_dataset(value: Any, base_dir: Path, field_name: str, role: str) -> Da
     if weight <= 0:
         raise ValueError(f"{field_name}.weight must be greater than 0")
 
+    augmentation = _parse_augmentation(value.get("augmentation"), field_name, role)
+
     name = str(value.get("name") or images_path.stem)
     print(
         f"[config] Dataset {field_name}: name={name} role={role} "
-        f"images={images_path} labels={labels_path} classes={len(classes)}"
+        f"images={images_path} labels={labels_path} classes={len(classes)} "
+        f"augmentation={augmentation or '{}'}"
     )
     return DatasetConfig(
         name=name,
@@ -217,7 +223,45 @@ def _parse_dataset(value: Any, base_dir: Path, field_name: str, role: str) -> Da
         classes=classes,
         role=role,
         weight=weight,
+        augmentation=augmentation,
     )
+
+
+AUGMENTATION_KEYS = ("hflip", "scale_crop")
+
+
+def _parse_augmentation(value: Any, field_name: str, role: str) -> Dict[str, float]:
+    """Validate a dataset's optional ``augmentation`` mapping.
+
+    Each entry is ``<name>: <fraction>`` — the fraction of samples the
+    augmentation is applied to each epoch. Only train datasets are augmented,
+    so declaring it elsewhere is rejected rather than silently ignored.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"{field_name}.augmentation must be a mapping")
+    if role != "train":
+        raise ValueError(
+            f"{field_name}.augmentation is only supported for train datasets (role={role})"
+        )
+
+    augmentation: Dict[str, float] = {}
+    for key, fraction in value.items():
+        if key not in AUGMENTATION_KEYS:
+            raise ValueError(
+                f"{field_name}.augmentation.{key} is not a known augmentation "
+                f"(supported: {', '.join(AUGMENTATION_KEYS)})"
+            )
+        try:
+            fraction = float(fraction)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field_name}.augmentation.{key} must be a number") from exc
+        if not 0.0 <= fraction <= 1.0:
+            raise ValueError(f"{field_name}.augmentation.{key} must be between 0 and 1")
+        if fraction > 0:
+            augmentation[key] = fraction
+    return augmentation
 
 
 def _parse_classes(value: Any, field_name: str) -> Dict[int, str]:

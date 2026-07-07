@@ -51,7 +51,25 @@ class ExperimentDatasetInline(admin.TabularInline):
     model = ExperimentDataset
     extra = 1
     autocomplete_fields = ["dataset", "annotator"]
-    fields = ["dataset", "role", "label_source", "annotator", "explicit_labels_path"]
+    fields = [
+        "dataset", "role", "label_source", "annotator", "explicit_labels_path",
+        "aug_hflip", "aug_hflip_fraction", "aug_scale_crop", "aug_scale_crop_fraction",
+    ]
+
+    def formfield_for_dbfield(self, db_field, request, **kwargs):
+        # Tabular inlines squeeze help_text into a 10px hover-only icon in the
+        # column header, which reads as missing. Mirror it onto the widget so
+        # hovering the checkbox/input itself shows the tooltip too.
+        field = super().formfield_for_dbfield(db_field, request, **kwargs)
+        if field is not None and field.help_text:
+            field.widget.attrs.setdefault("title", field.help_text)
+        return field
+
+    class Media:
+        # Shows each augmentation's fraction input only while its checkbox is
+        # ticked (train rows). Pure progressive enhancement — with JS off the
+        # inputs stay visible and model.clean() still validates them.
+        js = ("training/experiment_dataset_aug.js",)
 
 
 class ExperimentModelInline(admin.StackedInline):
@@ -353,7 +371,7 @@ class TrainedModelAdmin(admin.ModelAdmin):
     list_display = ["name", "stage", "arch", "num_classes", "map50", "map50_95", "created_at"]
     list_filter = ["stage", "arch"]
     search_fields = ["name", "description"]
-    actions = ["evaluate_on_dataset"]
+    actions = ["evaluate_on_dataset", "evaluate_with_pipeline"]
     readonly_fields = ["source_run_result", "created_at", "updated_at"]
 
     @admin.display(description="mAP50")
@@ -408,80 +426,70 @@ class TrainedModelAdmin(admin.ModelAdmin):
         }
         return TemplateResponse(request, "admin/training/eval_model.html", context)
 
+    @admin.action(description="Evaluate with a pipeline…")
+    def evaluate_with_pipeline(self, request, queryset):
+        from eval_pipelines.models import PipelineEvalRun
 
-@admin.register(EvalRun)
-class EvalRunAdmin(admin.ModelAdmin):
-    list_display = ["__str__", "trained_model", "dataset", "status_badge",
-                    "map50", "map50_95", "eval_time", "created_at"]
-    list_filter = ["status", "trained_model"]
-    actions = ["analyze_selected", "launch_selected", "reconcile_selected"]
-    readonly_fields = [
-        "trained_model", "dataset", "label_source", "annotator", "explicit_labels_path",
-        "status", "request_yaml_path", "output_dir", "metrics", "last_error",
-        "started_at", "finished_at", "created_at",
-    ]
+        if queryset.count() != 1:
+            self.message_user(request, "Select exactly one model to evaluate.",
+                              level=messages.WARNING)
+            return None
+        model = queryset.first()
 
-    def has_add_permission(self, request):
-        return False
+        if request.POST.get("apply"):
+            dataset = Dataset.objects.filter(pk=request.POST.get("dataset")).first()
+            if dataset is None:
+                self.message_user(request, "Choose a dataset.", level=messages.WARNING)
+                return None
+            pipeline = request.POST.get("pipeline") or PipelineEvalRun.BATCH_DETECT
+            label_source = request.POST.get("label_source") or PipelineEvalRun.SOURCE
+            annotator = Annotator.objects.filter(pk=request.POST.get("annotator")).first()
 
-    @admin.action(description="Analyze / compare metrics of selected eval(s)…")
-    def analyze_selected(self, request, queryset):
-        from training.services import eval_analytics
+            def _int(name):
+                raw = (request.POST.get(name) or "").strip()
+                return int(raw) if raw else None
 
-        runs = [e for e in queryset if isinstance(e.metrics, dict) and e.metrics]
-        skipped = [e for e in queryset if not (isinstance(e.metrics, dict) and e.metrics)]
-        if skipped:
+            def _float(name):
+                raw = (request.POST.get(name) or "").strip()
+                return float(raw) if raw else None
+
+            pe = PipelineEvalRun.objects.create(
+                trained_model=model, dataset=dataset, label_source=label_source,
+                annotator=annotator,
+                explicit_labels_path=request.POST.get("explicit_labels_path", ""),
+                pipeline=pipeline,
+                detector_checkpoint=(request.POST.get("detector_checkpoint") or "").strip(),
+                tile_size=_int("tile_size"), overlap=_float("overlap"),
+            )
+            try:
+                config_gen.write_pipeline_request(pe)
+            except (ValueError, FileNotFoundError, RuntimeError) as exc:
+                pe.delete()
+                self.message_user(request, f"Cannot build pipeline request: {exc}",
+                                  level=messages.ERROR)
+                return None
+            _queue().enqueue(jobs.run_pipeline_eval, pe.pk, job_timeout=jobs.JOB_TIMEOUT)
+            pe.status = PipelineEvalRun.QUEUED
+            pe.save(update_fields=["status"])
             self.message_user(
                 request,
-                "Skipped eval(s) with no ingested metrics yet: "
-                + ", ".join(f"#{e.pk}" for e in skipped),
-                level=messages.WARNING,
-            )
-        if not runs:
-            self.message_user(request, "No evaluated metrics to analyze.", level=messages.WARNING)
+                f"Pipeline eval #{pe.pk} ({pipeline}) queued for {model.name} on {dataset.name}.")
             return None
 
         context = {
             **self.admin_site.each_context(request),
-            "title": "Eval metrics comparison",
-            **eval_analytics.compare(runs),
+            "title": f"Evaluate {model.name} with a pipeline",
+            "model": model,
+            "datasets": Dataset.objects.all(),
+            "annotators": Annotator.objects.filter(status=Annotator.ACTIVE).order_by("username"),
+            "label_source_choices": PipelineEvalRun._meta.get_field("label_source").choices,
+            "pipeline_choices": PipelineEvalRun.PIPELINE_CHOICES,
+            "action": "evaluate_with_pipeline",
+            "selected": [str(model.pk)],
+            "action_checkbox_name": ACTION_CHECKBOX_NAME,
         }
-        return TemplateResponse(request, "admin/training/eval_analytics.html", context)
+        return TemplateResponse(request, "admin/training/pipeline_eval_model.html", context)
 
-    @admin.display(description="status", ordering="status")
-    def status_badge(self, obj):
-        return _status_badge(obj.status)
 
-    @admin.display(description="mAP50")
-    def map50(self, obj):
-        return obj.metric("map50")
-
-    @admin.display(description="mAP50-95")
-    def map50_95(self, obj):
-        return obj.metric("map50_95")
-
-    @admin.display(description="eval time")
-    def eval_time(self, obj):
-        seconds = obj.metric("eval_seconds")
-        return f"{seconds:.1f}s" if isinstance(seconds, (int, float)) else "—"
-
-    @admin.action(description="Launch / relaunch on trainer service")
-    def launch_selected(self, request, queryset):
-        queue = _queue()
-        for eval_run in queryset:
-            if not eval_run.request_yaml_path:
-                self.message_user(request, f"Eval #{eval_run.pk} has no request; skipped.",
-                                  level=messages.WARNING)
-                continue
-            queue.enqueue(jobs.run_eval, eval_run.pk, job_timeout=jobs.JOB_TIMEOUT)
-            eval_run.status = EvalRun.QUEUED
-            eval_run.save(update_fields=["status"])
-        self.message_user(request, "Eval job(s) queued — refresh to see progress.")
-
-    @admin.action(description="Reconcile status from trainer / disk")
-    def reconcile_selected(self, request, queryset):
-        from training.services import reconcile
-
-        for eval_run in queryset:
-            outcome = reconcile.reconcile_eval(eval_run)
-            self.message_user(request, f"Eval #{eval_run.pk}: {outcome}")
+# EvalRun's admin lives in ``eval_pipelines.admin`` (as the "Base Eval" proxy)
+# so the base and pipeline evals sit together under the "Eval Pipelines" section.

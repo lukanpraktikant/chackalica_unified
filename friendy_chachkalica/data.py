@@ -210,15 +210,130 @@ def detection_collate_fn(batch):
     return list(images), list(targets)
 
 
-def build_dataset(dataset_config: DatasetConfig, require_labels: bool = False) -> YoloDetectionDataset:
+class TrainAugmentations:
+    """Random train-time augmentations, each applied to a fraction of samples.
+
+    ``fractions`` maps augmentation name -> probability per sample per epoch
+    (see ``config.AUGMENTATION_KEYS``). Boxes stay absolute xyxy on the
+    (possibly transformed) image; images keep their original size, so nothing
+    downstream of the dataset changes shape.
+    """
+
+    SCALE_RANGE = (0.6, 1.0)  # crop window size as a fraction of each image side
+    MIN_BOX_VISIBILITY = 0.25  # drop boxes with less than this area left in the crop
+    MIN_BOX_SIDE_PX = 2.0  # drop boxes thinner than this after the crop resize
+
+    def __init__(self, fractions: dict):
+        self.hflip = float(fractions.get("hflip", 0.0))
+        self.scale_crop = float(fractions.get("scale_crop", 0.0))
+
+    def __call__(self, image, target):
+        import torch
+
+        # torch.rand honors the per-worker seeding the DataLoader sets up, so
+        # runs stay reproducible under training.seed.
+        if self.hflip > 0 and torch.rand(1).item() < self.hflip:
+            image, target = _horizontal_flip(image, target)
+        if self.scale_crop > 0 and torch.rand(1).item() < self.scale_crop:
+            image, target = _random_scale_crop(
+                image, target, self.SCALE_RANGE, self.MIN_BOX_VISIBILITY, self.MIN_BOX_SIDE_PX
+            )
+        return image, target
+
+
+def _horizontal_flip(image, target):
+    import torch
+
+    image = torch.flip(image, dims=[2])  # (C, H, W) -> flip width
+    boxes = target["boxes"]
+    if boxes.numel():
+        width = image.shape[2]
+        flipped = boxes.clone()
+        flipped[:, 0] = width - boxes[:, 2]
+        flipped[:, 2] = width - boxes[:, 0]
+        target["boxes"] = flipped
+    return image, target
+
+
+def _random_scale_crop(image, target, scale_range, min_visibility, min_side_px):
+    """Crop a random window of scale_range x the image, resize back to full size.
+
+    Boxes are shifted into the crop, clipped at its edges, rescaled with the
+    image, and dropped when the crop leaves too little of them (less than
+    ``min_visibility`` of their area or a side under ``min_side_px``).
+    """
+    import torch
+
+    _, height, width = image.shape
+    low, high = scale_range
+    scale = low + (high - low) * torch.rand(1).item()
+    crop_h = max(1, min(height, round(height * scale)))
+    crop_w = max(1, min(width, round(width * scale)))
+    if crop_h == height and crop_w == width:
+        return image, target
+
+    top = int(torch.randint(0, height - crop_h + 1, (1,)).item())
+    left = int(torch.randint(0, width - crop_w + 1, (1,)).item())
+
+    cropped = image[:, top : top + crop_h, left : left + crop_w]
+    image = torch.nn.functional.interpolate(
+        cropped.unsqueeze(0), size=(height, width), mode="bilinear", align_corners=False
+    ).squeeze(0)
+
+    boxes = target["boxes"]
+    if boxes.numel():
+        shifted = boxes - boxes.new_tensor([left, top, left, top])
+        clipped = shifted.clone()
+        clipped[:, 0::2] = clipped[:, 0::2].clamp(0, crop_w)
+        clipped[:, 1::2] = clipped[:, 1::2].clamp(0, crop_h)
+
+        # Rescale from crop coordinates back to the full-size image.
+        scale_x = width / crop_w
+        scale_y = height / crop_h
+        clipped = clipped * clipped.new_tensor([scale_x, scale_y, scale_x, scale_y])
+
+        widths = clipped[:, 2] - clipped[:, 0]
+        heights = clipped[:, 3] - clipped[:, 1]
+        original_area = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+        visible_area = widths * heights / (scale_x * scale_y)
+        keep = (
+            (widths >= min_side_px)
+            & (heights >= min_side_px)
+            & (visible_area >= min_visibility * original_area.clamp(min=1e-6))
+        )
+
+        target["boxes"] = clipped[keep]
+        target["labels"] = target["labels"][keep]
+        target["iscrowd"] = target["iscrowd"][keep]
+        target["area"] = (
+            (target["boxes"][:, 2] - target["boxes"][:, 0])
+            * (target["boxes"][:, 3] - target["boxes"][:, 1])
+        )
+    return image, target
+
+
+def build_train_augmentations(dataset_config: DatasetConfig):
+    """The transforms callable for a train dataset, or None when unconfigured."""
+    fractions = {k: v for k, v in (dataset_config.augmentation or {}).items() if v > 0}
+    if not fractions:
+        return None
+    return TrainAugmentations(fractions)
+
+
+def build_dataset(
+    dataset_config: DatasetConfig,
+    transforms=None,
+    require_labels: bool = False,
+) -> YoloDetectionDataset:
     print(
         f"[data] Building dataset name={dataset_config.name} role={dataset_config.role} "
-        f"classes={len(dataset_config.classes)}"
+        f"classes={len(dataset_config.classes)} transforms={transforms is not None}"
     )
     return YoloDetectionDataset(
         images_dir=dataset_config.images,
         labels_dir=dataset_config.labels,
         classes=dataset_config.classes,
+        transforms=transforms,
         require_labels=require_labels,
     )
 
@@ -227,7 +342,13 @@ def build_train_dataloader(
     config: ExperimentConfig,
     dataset_config: DatasetConfig,
 ) -> DataLoader:
-    dataset = build_dataset(dataset_config)
+    transforms = build_train_augmentations(dataset_config)
+    if transforms is not None:
+        print(
+            f"[data] Train augmentations for {dataset_config.name}: "
+            f"hflip={transforms.hflip} scale_crop={transforms.scale_crop}"
+        )
+    dataset = build_dataset(dataset_config, transforms=transforms)
     print(
         f"[data] Building train dataloader dataset={dataset_config.name} "
         f"batch_size={config.training.batch_size} workers={config.training.num_workers} "

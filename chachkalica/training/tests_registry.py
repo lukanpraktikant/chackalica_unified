@@ -279,3 +279,42 @@ class EvalCompareTests(TestCase):
         self.assertEqual(row["class_name"], "object")
         # b (col 0 after sort by map50) has higher ap50 → its cell wins.
         self.assertTrue(row["ap50"][0]["is_best"])
+
+    def test_confusion_matrix_reshaped_for_heatmap(self):
+        from training.services import eval_analytics
+
+        # 2 classes (cat, dog) + background. 3 cats correct, 1 cat called dog, 1 cat
+        # missed; 4 dogs correct; 2 spurious dog predictions (background row).
+        run = self._eval("m", "rfdetr", {"map50": 0.5, "confusion_matrix": {
+            "labels": ["cat", "dog"],
+            "background_index": 2,
+            "iou_threshold": 0.5,
+            "conf_threshold": 0.25,
+            "matrix": [
+                [3, 1, 1],   # truth=cat
+                [0, 4, 0],   # truth=dog
+                [0, 2, 0],   # truth=background (false positives)
+            ],
+        }})
+        result = eval_analytics.compare([run])
+        self.assertEqual(len(result["confusion_matrices"]), 1)
+        cm = result["confusion_matrices"][0]
+        self.assertEqual(cm["axis"], ["cat", "dog", "background"])
+        self.assertEqual(cm["iou_threshold"], 0.5)
+
+        cat_row = cm["rows"][0]
+        # Diagonal cat/cat is flagged and shaded by its row share (3 of 5).
+        self.assertTrue(cat_row["cells"][0]["is_diagonal"])
+        self.assertAlmostEqual(cat_row["cells"][0]["intensity"], 0.6)
+        # The cat-called-dog cell is a confusion, not a diagonal.
+        self.assertFalse(cat_row["cells"][1]["is_diagonal"])
+        self.assertTrue(cat_row["cells"][2]["is_background"])
+        # The background row (false positives) is flagged as such.
+        self.assertTrue(cm["rows"][2]["is_background"])
+
+    def test_confusion_matrix_absent_when_metric_missing(self):
+        from training.services import eval_analytics
+
+        run = self._eval("old", "yolox", {"map50": 0.5})  # pre-confusion-matrix eval
+        result = eval_analytics.compare([run])
+        self.assertEqual(result["confusion_matrices"], [])
