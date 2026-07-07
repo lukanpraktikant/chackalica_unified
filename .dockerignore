@@ -1,0 +1,14 @@
+# Root build context for the trainer image (docker-compose `trainer` service
+# builds from here so it can copy BOTH friendy_chachkalica/ and chachak/ in a
+# repo-root layout — chachak imports friendy_chachkalica as a package). Keep the
+# context lean: the Django app tree, data, venvs, and git history are irrelevant
+# to the trainer image and huge.
+chachkalica/
+.git/
+**/.venv/
+**/__pycache__/
+*.pyc
+**/data/
+**/runs/
+*.pt
+.env

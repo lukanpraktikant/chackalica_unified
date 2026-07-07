@@ -22,6 +22,11 @@ datasets:
       images: ../datasets/field-v1/images/train
       labels: ../datasets/field-v1/labels/train
       classes: [helmet, head, vest]
+      # Optional (train datasets only). Each value is the fraction of samples the
+      # augmentation is applied to per epoch (0-1). Omit or 0 to disable.
+      augmentation:
+        hflip: 0.5        # random horizontal flip (boxes mirrored)
+        scale_crop: 0.3   # random 60-100% crop resized back; boxes clipped/dropped at edges
 
     - name: warehouse-v2
       images: ../datasets/warehouse-v2/images/train

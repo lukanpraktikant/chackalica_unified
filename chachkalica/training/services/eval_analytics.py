@@ -85,6 +85,61 @@ def _class_rows(columns) -> list[dict]:
     return rows
 
 
+def _confusion_matrix(column) -> dict | None:
+    """Reshape a column's stored ``confusion_matrix`` metric for the heatmap table.
+
+    Returns None for evals whose metrics predate the confusion matrix (they simply
+    won't render one). Rows are ground-truth classes, columns predictions, both with
+    a trailing "background" axis label. Each cell carries its raw count plus a
+    row-normalised ``intensity`` (share of that truth class) so the template can shade
+    the heatmap without re-deriving totals; the diagonal and background cells are
+    flagged so correct detections and errors can be coloured differently.
+    """
+    cm = column["metrics"].get("confusion_matrix")
+    if not isinstance(cm, dict):
+        return None
+    matrix = cm.get("matrix")
+    labels = cm.get("labels")
+    if not isinstance(matrix, list) or not isinstance(labels, list) or not matrix:
+        return None
+
+    background = cm.get("background_index")
+    if not isinstance(background, int):
+        background = len(labels)
+    axis = [str(label) for label in labels] + ["background"]
+
+    rows = []
+    for i, raw_row in enumerate(matrix):
+        if not isinstance(raw_row, list):
+            return None
+        values = [v if isinstance(v, (int, float)) and not isinstance(v, bool) else 0 for v in raw_row]
+        total = sum(values)
+        rows.append({
+            "label": axis[i] if i < len(axis) else str(i),
+            "is_background": i == background,
+            "cells": [
+                {
+                    "value": v,
+                    "is_diagonal": i == j and i != background,
+                    "is_background": i == background or j == background,
+                    "intensity": round(v / total, 4) if total else 0.0,
+                }
+                for j, v in enumerate(values)
+            ],
+        })
+
+    return {
+        "id": column["id"],
+        "model": column["model"],
+        "arch": column["arch"],
+        "dataset": column["dataset"],
+        "axis": axis,
+        "iou_threshold": _num(cm.get("iou_threshold")),
+        "conf_threshold": _num(cm.get("conf_threshold")),
+        "rows": rows,
+    }
+
+
 def compare(eval_runs) -> dict:
     """Build the comparison context for a list of EvalRuns (metrics required).
 
@@ -99,4 +154,5 @@ def compare(eval_runs) -> dict:
         "columns": columns,
         "overall_rows": _overall_rows(columns),
         "class_rows": _class_rows(columns),
+        "confusion_matrices": [cm for cm in (_confusion_matrix(c) for c in columns) if cm],
     }

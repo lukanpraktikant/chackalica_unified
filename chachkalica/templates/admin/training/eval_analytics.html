@@ -15,6 +15,24 @@
   .ev-cmp td.best { background: #e3f6e6; color: #14692b; font-weight: 700; }
   .ev-cmp td.na { color: #bbb; }
   .ev-cmp .note { color: #777; font-size: 12px; }
+  .ev-cmp h3 { margin: 0 0 .2em; font-size: 14px; }
+  .ev-cmp h3 .arch { display: inline; font-size: 12px; }
+  .ev-cmp .cmx-grid { display: flex; flex-wrap: wrap; gap: 26px; align-items: flex-start; }
+  .ev-cmp .cmx-block { margin: 6px 0 12px; }
+  .ev-cmp table.cmx { border-collapse: collapse; }
+  .ev-cmp table.cmx th, .ev-cmp table.cmx td {
+    border: 1px solid #dcdcdc; padding: 5px 12px; text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .ev-cmp table.cmx thead th { text-align: center; font-size: 12px; color: #555; font-weight: 600; }
+  .ev-cmp table.cmx th.corner { text-align: left; font-weight: 400; font-size: 11px; color: #999; }
+  .ev-cmp table.cmx th.rowlabel { text-align: left; background: #fafafa; }
+  /* Correct detections shade green with their row share; confusions and background
+     cells (misclassifications, false positives, misses) shade red. */
+  .ev-cmp table.cmx td.cmcell { background: rgba(198, 40, 40, calc(var(--i) * 0.82)); }
+  .ev-cmp table.cmx td.diag { background: rgba(20, 120, 55, calc(var(--i) * 0.9)); }
+  .ev-cmp table.cmx td.zero { color: #ccc; }
+  .ev-cmp .axis-note { color: #777; font-size: 12px; margin: .2em 0 0; }
 </style>
 {% endblock %}
 
@@ -45,6 +63,42 @@
     {% endfor %}
   </tbody>
 </table>
+
+{% if confusion_matrices %}
+  <h2>Confusion matrix</h2>
+  <p class="note">Rows are ground truth, columns are predictions, so the diagonal is
+     correct detections. The <em>background</em> row counts spurious predictions
+     (false positives) and the <em>background</em> column counts missed objects.
+     Each cell is shaded by its row (share of that ground-truth class): green on the
+     diagonal, red for confusions and background.</p>
+  <div class="cmx-grid">
+  {% for cm in confusion_matrices %}
+    <div class="cmx-block">
+    <h3>{{ cm.model }} <span class="arch">{{ cm.arch }} · on {{ cm.dataset }}</span></h3>
+    <table class="cmx">
+      <thead>
+        <tr>
+          <th class="corner">truth ＼ pred</th>
+          {% for label in cm.axis %}<th>{{ label }}</th>{% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in cm.rows %}
+          <tr>
+            <th class="rowlabel">{{ row.label }}</th>
+            {% for cell in row.cells %}
+              <td class="{% if cell.is_diagonal %}diag{% else %}cmcell{% endif %}{% if cell.value == 0 %} zero{% endif %}"
+                  style="--i: {{ cell.intensity }}">{{ cell.value }}</td>
+            {% endfor %}
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% if cm.iou_threshold %}<p class="axis-note">Matched at IoU ≥ {{ cm.iou_threshold }}{% if cm.conf_threshold %}, confidence ≥ {{ cm.conf_threshold }}{% endif %}.</p>{% endif %}
+    </div>
+  {% endfor %}
+  </div>
+{% endif %}
 
 {% if class_rows %}
   <h2>Per-class AP</h2>

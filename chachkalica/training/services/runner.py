@@ -83,3 +83,19 @@ def fetch_eval_status(eval_run, ts: TrainingSettings | None = None) -> dict:
         return {"status": "unknown"}
     resp.raise_for_status()
     return resp.json()
+
+
+def launch_pipeline(pe, ts: TrainingSettings | None = None) -> dict:
+    """Ask the service to run a chachak pipeline eval from its generated request."""
+    payload = {"pipeline_id": pe.pk, "request_path": pe.request_yaml_path}
+    resp = requests.post(f"{base_url(ts)}/pipeline", json=payload, timeout=TIMEOUT)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def fetch_pipeline_status(pe, ts: TrainingSettings | None = None) -> dict:
+    resp = requests.get(f"{base_url(ts)}/pipelines/{pe.pk}", timeout=TIMEOUT)
+    if resp.status_code == 404:
+        return {"status": "unknown"}
+    resp.raise_for_status()
+    return resp.json()

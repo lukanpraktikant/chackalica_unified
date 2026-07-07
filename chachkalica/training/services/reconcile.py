@@ -109,8 +109,46 @@ def reconcile_eval(eval_run: EvalRun) -> str:
     return "lost"
 
 
+def reconcile_pipeline(pe) -> str:
+    """Re-derive and finalize one stranded :class:`PipelineEvalRun`. Returns an outcome."""
+    from eval_pipelines.models import PipelineEvalRun
+
+    try:
+        status = runner.fetch_pipeline_status(pe)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("reconcile: pipeline eval #%s status unreachable: %s", pe.pk, exc)
+        return "unreachable"
+
+    state = status.get("status")
+    if state == "error":
+        jobs._mark_pipeline(pe, PipelineEvalRun.ERROR, error=status.get("log_tail", "")[-4000:],
+                            finished=True)
+        return "error"
+    if state == "ok" or (state == "unknown" and ingest.pipeline_is_complete(pe.output_dir)):
+        jobs.finalize_pipeline_success(pe)
+        return "ok"
+    if state == "running":
+        if pe.status != PipelineEvalRun.RUNNING:
+            pe.status = PipelineEvalRun.RUNNING
+            pe.save(update_fields=["status"])
+        return "running"
+
+    if _has_live_job("run_pipeline_eval", pe.pk):
+        return "pending"
+    jobs._mark_pipeline(pe, PipelineEvalRun.ERROR,
+                        error="pipeline eval lost: trainer has no record and no result on disk",
+                        finished=True)
+    return "lost"
+
+
 def reconcile_all() -> dict:
     """Reconcile every training/eval run currently stuck at running/queued."""
+    from eval_pipelines.models import PipelineEvalRun
+
     runs = {r.pk: reconcile_run(r) for r in TrainingRun.objects.filter(status__in=_ACTIVE)}
     evals = {e.pk: reconcile_eval(e) for e in EvalRun.objects.filter(status__in=_ACTIVE)}
-    return {"runs": runs, "evals": evals}
+    pipelines = {
+        p.pk: reconcile_pipeline(p)
+        for p in PipelineEvalRun.objects.filter(status__in=_ACTIVE)
+    }
+    return {"runs": runs, "evals": evals, "pipelines": pipelines}

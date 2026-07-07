@@ -58,6 +58,7 @@ INSTALLED_APPS = [
     "django_rq",
     "fleet",
     "training",
+    "eval_pipelines",
 ]
 
 MIDDLEWARE = [

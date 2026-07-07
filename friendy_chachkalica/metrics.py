@@ -5,6 +5,11 @@ import torch
 
 DEFAULT_IOU_THRESHOLDS = [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95]
 
+# The confusion matrix is built at a single, human-meaningful operating point rather
+# than the ~0.001 score floor the AP curves sweep down to: a matrix that counted every
+# faint detection would be swamped by background false positives and tell you nothing.
+CONFUSION_CONF_THRESHOLD = 0.25
+
 
 def evaluate_detection(
     predictions: Sequence[torch.Tensor],
@@ -99,6 +104,16 @@ def evaluate_detection(
     recall = _micro_recall(prepared_predictions, prepared_targets, iou_threshold=0.5)
     f1 = _f1(precision, recall)
 
+    confusion_iou = 0.5 if 0.5 in thresholds else thresholds[0]
+    confusion = _confusion_matrix(
+        prepared_predictions,
+        prepared_targets,
+        class_ids,
+        effective_eval_classes,
+        iou_threshold=confusion_iou,
+        conf_threshold=CONFUSION_CONF_THRESHOLD,
+    )
+
     return {
         'map50': _mean(ap50_by_class.values()),
         'map50_95': _mean(ap5095_by_class.values()),
@@ -109,6 +124,7 @@ def evaluate_detection(
         'num_predictions': int(sum(len(prediction['labels']) for prediction in prepared_predictions)),
         'num_targets': int(sum(len(target['labels']) for target in prepared_targets)),
         'iou_thresholds': thresholds,
+        'confusion_matrix': confusion,
         'per_class': {
             int(class_id): {
                 'class_name': _class_name(effective_eval_classes, class_id),
@@ -398,6 +414,89 @@ def _first_occurrence_mask(keys: torch.Tensor) -> torch.Tensor:
     mask = torch.zeros((keys.numel(),), dtype=torch.bool)
     mask[sort_index[is_first_sorted]] = True
     return mask
+
+
+def _confusion_matrix(
+    predictions,
+    targets,
+    class_ids,
+    eval_classes: Optional[Dict[int, str]],
+    iou_threshold: float,
+    conf_threshold: float,
+) -> Dict[str, Any]:
+    """Build a class-including confusion matrix at one IoU + confidence threshold.
+
+    Rows are ground-truth classes, columns are predicted classes, with a trailing
+    "background" row and column. ``matrix[i][j]`` counts detections whose matched
+    ground truth is class ``i`` and whose predicted class is ``j``; the diagonal is
+    correct detections and off-diagonal cells are class confusions (a box found but
+    mislabelled). The background *row* (index ``len(class_ids)``) counts predictions
+    that matched no ground truth — false positives — and the background *column*
+    counts ground truths no prediction claimed — misses.
+
+    Each prediction (score >= ``conf_threshold``) is matched greedily by descending
+    score to its highest-IoU still-unclaimed ground truth in the same image,
+    regardless of class; a match requires IoU >= ``iou_threshold``. This mirrors the
+    one-gt-per-prediction accounting used for AP but scores class agreement rather
+    than only presence, so a wrong label lands off the diagonal instead of counting
+    as both a miss and a false positive.
+    """
+    index_of = {int(class_id): position for position, class_id in enumerate(class_ids)}
+    background = len(class_ids)
+    size = background + 1
+    matrix = [[0] * size for _ in range(size)]
+
+    for prediction, target in zip(predictions, targets):
+        keep = prediction['scores'] >= float(conf_threshold)
+        pred_labels = prediction['labels'][keep]
+        pred_boxes = prediction['boxes'][keep]
+        pred_scores = prediction['scores'][keep]
+        gt_labels = target['labels']
+        gt_boxes = target['boxes']
+        num_pred = int(pred_labels.numel())
+        num_gt = int(gt_labels.numel())
+
+        gt_claimed = [False] * num_gt
+        pred_matched = [False] * num_pred
+
+        if num_pred and num_gt:
+            ious = box_iou(pred_boxes, gt_boxes)
+            for pred_index in torch.argsort(pred_scores, descending=True, stable=True).tolist():
+                available = [gt for gt in range(num_gt) if not gt_claimed[gt]]
+                if not available:
+                    break
+                overlaps = ious[pred_index]
+                best_gt = max(available, key=lambda gt: float(overlaps[gt]))
+                if float(overlaps[best_gt]) < iou_threshold:
+                    continue
+                gt_claimed[best_gt] = True
+                pred_matched[pred_index] = True
+                truth = index_of.get(int(gt_labels[best_gt]))
+                predicted = index_of.get(int(pred_labels[pred_index]))
+                if truth is not None and predicted is not None:
+                    matrix[truth][predicted] += 1
+
+        for pred_index in range(num_pred):
+            if pred_matched[pred_index]:
+                continue
+            predicted = index_of.get(int(pred_labels[pred_index]))
+            if predicted is not None:
+                matrix[background][predicted] += 1
+
+        for gt_index in range(num_gt):
+            if gt_claimed[gt_index]:
+                continue
+            truth = index_of.get(int(gt_labels[gt_index]))
+            if truth is not None:
+                matrix[truth][background] += 1
+
+    return {
+        'labels': [_class_name(eval_classes, class_id) or str(class_id) for class_id in class_ids],
+        'background_index': background,
+        'iou_threshold': float(iou_threshold),
+        'conf_threshold': float(conf_threshold),
+        'matrix': matrix,
+    }
 
 
 def _micro_precision(predictions, targets, iou_threshold: float) -> float:

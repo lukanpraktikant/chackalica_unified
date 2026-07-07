@@ -91,3 +91,16 @@ def ingest_eval(eval_run) -> dict:
     eval_run.metrics = data.get("metrics")
     eval_run.save(update_fields=["metrics"])
     return {"metrics": eval_run.metrics}
+
+
+def pipeline_is_complete(output_dir: str | Path) -> bool:
+    """A chachak pipeline eval is done once result.yaml is written."""
+    return (Path(output_dir) / "result.yaml").exists()
+
+
+def ingest_pipeline_eval(pe) -> dict:
+    """Pull metrics from a pipeline eval's result.yaml onto the PipelineEvalRun."""
+    data = _load_yaml(Path(pe.output_dir) / "result.yaml") or {}
+    pe.metrics = data.get("metrics")
+    pe.save(update_fields=["metrics"])
+    return {"metrics": pe.metrics}

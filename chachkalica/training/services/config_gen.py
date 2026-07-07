@@ -71,13 +71,34 @@ def images_dir(dataset) -> Path:
 
 
 def dataset_entry(exp_dataset: ExperimentDataset) -> dict:
-    """Build one YAML dataset entry: {name, images, labels, classes}."""
-    return {
+    """Build one YAML dataset entry: {name, images, labels, classes[, augmentation]}."""
+    entry = {
         "name": exp_dataset.dataset.name,
         "images": str(images_dir(exp_dataset.dataset)),
         "labels": str(label_dir(exp_dataset)),
         "classes": dataset_classes(exp_dataset.dataset),
     }
+    augmentation = augmentation_entry(exp_dataset)
+    if augmentation:
+        entry["augmentation"] = augmentation
+    return entry
+
+
+def augmentation_entry(exp_dataset: ExperimentDataset) -> dict:
+    """The dataset's `augmentation` block: enabled checkboxes -> fractions.
+
+    The trainer only augments train datasets (and rejects the key elsewhere),
+    so flags on val/test rows are never emitted — model.clean() already blocks
+    saving them, but rows predating that validation shouldn't break a run.
+    """
+    if exp_dataset.role != ExperimentDataset.TRAIN:
+        return {}
+    augmentation = {}
+    if exp_dataset.aug_hflip and exp_dataset.aug_hflip_fraction:
+        augmentation["hflip"] = exp_dataset.aug_hflip_fraction
+    if exp_dataset.aug_scale_crop and exp_dataset.aug_scale_crop_fraction:
+        augmentation["scale_crop"] = exp_dataset.aug_scale_crop_fraction
+    return augmentation
 
 
 def model_entry(exp_model: ExperimentModel) -> dict:
@@ -227,6 +248,82 @@ def write_eval_request(eval_run, ts: TrainingSettings | None = None) -> tuple[Pa
     eval_run.request_yaml_path = str(request_path)
     eval_run.output_dir = str(output_dir)
     eval_run.save(update_fields=["request_yaml_path", "output_dir"])
+    return request_path, text
+
+
+def pipeline_request_paths(pe, ts: TrainingSettings | None = None):
+    ts = ts or TrainingSettings.load()
+    stem = f"pipeline-{pe.pk}"
+    return _resolve(ts.configs_root) / f"{stem}.yaml", _resolve(ts.runs_root) / stem
+
+
+def build_pipeline_request(pe, output_dir: Path | str, ts: TrainingSettings | None = None) -> dict:
+    """Assemble the chachak request consumed by ``chachak/run.py``.
+
+    ``classes`` is the *eval dataset's* class space (the target labels); the
+    model's own train-class space is read from the checkpoint by chachak. Only
+    non-default detector/tiling knobs are emitted so chachak's own defaults apply
+    when the operator left a field blank. Raises ``ValueError`` when a
+    detector-requiring pipeline has no detector checkpoint (mirrors
+    ``chachak/config.py``'s own validation, but caught before we enqueue).
+    """
+    ts = ts or TrainingSettings.load()
+    tm = pe.trained_model
+    ds = pe.dataset
+    if not tm.checkpoint_path:
+        raise ValueError(f"{tm.name}: no checkpoint path to evaluate.")
+
+    from eval_pipelines.models import PipelineEvalRun
+
+    data = {
+        "name": f"pipeline-{pe.pk}",
+        "pipeline": pe.pipeline,
+        "model_checkpoint": tm.checkpoint_path,
+        "images": str(images_dir(ds)),
+        "labels": str(resolve_label_dir(
+            ds, pe.label_source, pe.annotator, pe.explicit_labels_path)),
+        "classes": dataset_classes(ds),
+        "output_dir": str(output_dir),
+        "score_threshold": 0.001,
+        "iou_thresholds": default_iou_thresholds(),
+        "device": ts.default_device,
+    }
+
+    if pe.pipeline == PipelineEvalRun.CHAIN and pe.chain:
+        data["chain"] = list(pe.chain)
+
+    needs_detector = pe.pipeline in PipelineEvalRun.DETECTOR_PIPELINES or (
+        pe.pipeline == PipelineEvalRun.CHAIN
+        and any(c in PipelineEvalRun.DETECTOR_PIPELINES for c in (pe.chain or []))
+    )
+    if pe.detector_checkpoint:
+        data["detector"] = {"checkpoint": pe.detector_checkpoint}
+    elif needs_detector:
+        raise ValueError(
+            f"pipeline '{pe.pipeline}' requires a detector checkpoint.")
+
+    tiling = {}
+    if pe.tile_size:
+        tiling["tile_size"] = pe.tile_size
+    if pe.overlap is not None:
+        tiling["overlap"] = pe.overlap
+    if tiling:
+        data["tiling"] = tiling
+
+    return data
+
+
+def write_pipeline_request(pe, ts: TrainingSettings | None = None) -> tuple[Path, str]:
+    """Generate the chachak request YAML for ``pe`` and persist its paths."""
+    ts = ts or TrainingSettings.load()
+    request_path, output_dir = pipeline_request_paths(pe, ts)
+    data = build_pipeline_request(pe, output_dir, ts)
+    text = yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
+    request_path.parent.mkdir(parents=True, exist_ok=True)
+    request_path.write_text(text, encoding="utf-8")
+    pe.request_yaml_path = str(request_path)
+    pe.output_dir = str(output_dir)
+    pe.save(update_fields=["request_yaml_path", "output_dir"])
     return request_path, text
 
 

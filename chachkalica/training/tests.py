@@ -136,6 +136,66 @@ class ConfigGenTests(TestCase):
         with self.assertRaises(ValidationError):
             ed.clean()
 
+    def test_augmentation_block_emitted_for_enabled_train_flags(self):
+        ed = self.exp.datasets.first()
+        ed.aug_hflip = True
+        ed.aug_hflip_fraction = 0.5
+        ed.aug_scale_crop = True
+        ed.aug_scale_crop_fraction = 0.3
+        ed.save()
+        entry = config_gen.build_experiment_dict(self.exp, "/out")["datasets"]["train"][0]
+        self.assertEqual(entry["augmentation"], {"hflip": 0.5, "scale_crop": 0.3})
+
+    def test_augmentation_block_absent_when_disabled(self):
+        # Checkboxes off (the default) -> no augmentation key at all, so the
+        # YAML stays identical to the pre-augmentation format.
+        entry = config_gen.build_experiment_dict(self.exp, "/out")["datasets"]["train"][0]
+        self.assertNotIn("augmentation", entry)
+
+    def test_augmentation_only_partially_enabled(self):
+        ed = self.exp.datasets.first()
+        ed.aug_scale_crop = True
+        ed.aug_scale_crop_fraction = 0.25
+        ed.save()
+        entry = config_gen.build_experiment_dict(self.exp, "/out")["datasets"]["train"][0]
+        self.assertEqual(entry["augmentation"], {"scale_crop": 0.25})
+
+    def test_augmentation_never_emitted_for_val_rows(self):
+        # A stale non-train row with flags set (predating clean()'s guard) must
+        # not leak an augmentation block the trainer would reject.
+        ExperimentDataset.objects.create(
+            experiment=self.exp, dataset=self.ds1, role=ExperimentDataset.VAL,
+            aug_hflip=True,
+        )
+        data = config_gen.build_experiment_dict(self.exp, "/out")
+        self.assertNotIn("augmentation", data["datasets"]["val"])
+
+    def test_clean_rejects_augmentation_on_non_train_role(self):
+        ed = ExperimentDataset(
+            experiment=self.exp, dataset=self.ds1,
+            role=ExperimentDataset.VAL, aug_hflip=True,
+        )
+        with self.assertRaises(ValidationError):
+            ed.clean()
+
+    def test_clean_rejects_out_of_range_fraction(self):
+        for bad in (0, -0.1, 1.5, None):
+            ed = ExperimentDataset(
+                experiment=self.exp, dataset=self.ds1,
+                role=ExperimentDataset.TRAIN,
+                aug_hflip=True, aug_hflip_fraction=bad,
+            )
+            with self.assertRaises(ValidationError, msg=f"fraction={bad}"):
+                ed.clean()
+
+    def test_clean_ignores_fraction_when_augmentation_off(self):
+        ed = ExperimentDataset(
+            experiment=self.exp, dataset=self.ds1,
+            role=ExperimentDataset.TRAIN,
+            aug_hflip=False, aug_hflip_fraction=7.0,
+        )
+        ed.clean()  # must not raise: the fraction is inert while unticked
+
     def test_early_stopping_patience_flows_into_training_dict(self):
         self.exp.early_stopping_patience = 10
         self.exp.save()
@@ -146,6 +206,30 @@ class ConfigGenTests(TestCase):
         self.exp.save()
         data = config_gen.build_experiment_dict(self.exp, "/out/exp1")
         self.assertIsNone(data["training"]["early_stopping_patience"])
+
+
+class ExperimentAdminRenderTests(TestCase):
+    """The dataset inline must render the augmentation widgets and their JS."""
+
+    def test_add_form_renders_augmentation_fields(self):
+        from django.contrib.auth.models import User
+
+        user = User.objects.create_superuser("admin", "admin@example.com", "pw")
+        self.client.force_login(user)
+        resp = self.client.get("/admin/training/experiment/add/")
+        self.assertEqual(resp.status_code, 200)
+        for name in ["aug_hflip", "aug_hflip_fraction", "aug_scale_crop",
+                     "aug_scale_crop_fraction"]:
+            self.assertContains(resp, name)
+        self.assertContains(resp, "training/experiment_dataset_aug.js")
+        # Help must be hoverable on the widget itself, not only on the tabular
+        # header's 10px icon (formfield_for_dbfield mirrors it into title=).
+        html = resp.content.decode()
+        checkbox = next(
+            line for line in html.splitlines()
+            if 'id="id_datasets-0-aug_hflip"' in line and 'type="checkbox"' in line
+        )
+        self.assertIn('title="Randomly mirror images', checkbox)
 
 
 class RFDETRResolutionValidationTests(TestCase):

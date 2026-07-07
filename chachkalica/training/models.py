@@ -179,6 +179,34 @@ class ExperimentDataset(models.Model):
         help_text="Required when label source is 'explicit path'.",
     )
 
+    # --- train-time augmentations (train role only) ---
+    # Each checkbox enables one augmentation; its fraction is how much of the
+    # dataset gets that augmentation per epoch (0-1). Emitted into the YAML as
+    # the dataset's `augmentation` block, consumed by friendy_chachkalica.
+    aug_hflip = models.BooleanField(
+        default=False, verbose_name="hflip",
+        help_text="Randomly mirror images (and their boxes) horizontally during "
+                  "training. Applied on the fly, replacing the original for that "
+                  "epoch — the dataset does not get bigger. Train datasets only.",
+    )
+    aug_hflip_fraction = models.FloatField(
+        default=0.5, verbose_name="hflip fraction",
+        help_text="Chance (0-1) each image is flipped in a given epoch; 0.5 means "
+                  "about half the images, a different random half every epoch.",
+    )
+    aug_scale_crop = models.BooleanField(
+        default=False, verbose_name="scale+crop",
+        help_text="Randomly crop a 60-100% window and scale it back up; boxes are "
+                  "clipped/dropped at crop edges. Applied on the fly, replacing the "
+                  "original for that epoch — the dataset does not get bigger. "
+                  "Train datasets only.",
+    )
+    aug_scale_crop_fraction = models.FloatField(
+        default=0.5, verbose_name="scale+crop fraction",
+        help_text="Chance (0-1) each image is scale-cropped in a given epoch; 0.5 "
+                  "means about half the images, a different random half every epoch.",
+    )
+
     class Meta:
         ordering = ["id"]  # the order rows were added
 
@@ -192,6 +220,22 @@ class ExperimentDataset(models.Model):
             raise ValidationError({"annotator": "Pick an annotator for 'annotator output'."})
         if self.label_source == self.EXPLICIT and not self.explicit_labels_path.strip():
             raise ValidationError({"explicit_labels_path": "Provide a path for 'explicit path'."})
+
+        if self.role != self.TRAIN and (self.aug_hflip or self.aug_scale_crop):
+            field = "aug_hflip" if self.aug_hflip else "aug_scale_crop"
+            raise ValidationError(
+                {field: "Augmentations only apply to train datasets — untick it or "
+                        "set the role to train."}
+            )
+        for enabled, fraction_field in [
+            (self.aug_hflip, "aug_hflip_fraction"),
+            (self.aug_scale_crop, "aug_scale_crop_fraction"),
+        ]:
+            fraction = getattr(self, fraction_field)
+            if enabled and not (fraction is not None and 0 < fraction <= 1):
+                raise ValidationError(
+                    {fraction_field: "Enter a fraction between 0 (exclusive) and 1."}
+                )
 
 
 class ExperimentModel(models.Model):

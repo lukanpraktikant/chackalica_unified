@@ -55,8 +55,8 @@ def train_experiment(
     _write_yaml(config.output_dir / "config.resolved.yaml", _to_builtin(config))
     print(f"[train] Wrote resolved config: {config.output_dir / 'config.resolved.yaml'}")
 
-    train_loaders: Dict[DatasetConfig, DataLoader] = {}
-    eval_loaders: Dict[DatasetConfig, DataLoader] = {}
+    train_loaders: Dict[tuple, DataLoader] = {}
+    eval_loaders: Dict[tuple, DataLoader] = {}
     results = []
     runs = build_experiment_runs(config)
     print(f"[train] Training {len(runs)} run(s) (resume={resume})")
@@ -640,6 +640,7 @@ def _dataset_cache_key(dataset_config: DatasetConfig) -> tuple:
         str(dataset_config.images),
         str(dataset_config.labels),
         dataset_config.role,
+        tuple(sorted((dataset_config.augmentation or {}).items())),
     )
 
 

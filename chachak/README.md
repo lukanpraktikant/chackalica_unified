@@ -43,6 +43,23 @@ from chachak import load_pipeline_config, run_pipeline
 run_pipeline(load_pipeline_config("chachak/configs/batch_people.yaml"))
 ```
 
+## Tests
+
+Tests use stub model/detector adapters (a duck-typed `.predict`), so no
+checkpoint or GPU is needed — but they do import the sibling `friendy_chachkalica`
+stack (torch, torchvision, ...), so run them where those are installed. In this
+repo that's the `trainer` container, with the source mounted:
+
+```bash
+docker compose run --rm -v "$PWD:/work" -w /work/chachak trainer \
+    python -m unittest discover -s tests -p "test_*.py"
+```
+
+Coverage: `test_boxes.py` (tiling/crop/remap/merge geometry), `test_pipelines.py`
+(all three pipelines + chain + the `run()` loop writing `predictions.pt`/metrics),
+`test_config.py` (loader parsing + validation), `test_registry.py`
+(`build_pipeline` + `Detector` person-class filtering).
+
 ## Adding a pipeline
 
 1. Subclass `Pipeline` in `pipeline.py` and implement

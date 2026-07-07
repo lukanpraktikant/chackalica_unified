@@ -87,7 +87,12 @@ services:
     command: python manage.py rqworker default
 
   trainer:
-    build: ./friendy_chachkalica
+    # Repo-root context so the image can hold BOTH friendy_chachkalica/ and
+    # chachak/ side by side — chachak (run by the /pipeline endpoint) imports
+    # friendy_chachkalica as a package from the repo root. See its Dockerfile.
+    build:
+      context: .
+      dockerfile: friendy_chachkalica/Dockerfile
     environment:
       FC_PORT: ${FC_PORT:-8200}
       # Single-GPU safety: refuse a second concurrent launch with HTTP 409.

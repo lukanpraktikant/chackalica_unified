@@ -142,3 +142,61 @@ def finalize_eval_success(eval_run: EvalRun) -> dict:
     summary = ingest.ingest_eval(eval_run)
     _mark_eval(eval_run, EvalRun.OK, finished=True)
     return {"status": "ok", **summary}
+
+
+def _mark_pipeline(pe, status: str, *, error: str = "", finished: bool = False):
+    pe.status = status
+    pe.last_error = error
+    if finished:
+        pe.finished_at = timezone.now()
+    pe.save(update_fields=["status", "last_error", "finished_at"])
+
+
+def run_pipeline_eval(pe_id: int) -> dict:
+    """Drive one chachak pipeline eval through the trainer service's /pipeline."""
+    from eval_pipelines.models import PipelineEvalRun
+
+    pe = PipelineEvalRun.objects.get(pk=pe_id)
+    pe.status = PipelineEvalRun.RUNNING
+    pe.started_at = timezone.now()
+    pe.last_error = ""
+    pe.save(update_fields=["status", "started_at", "last_error"])
+
+    try:
+        runner.launch_pipeline(pe)
+    except Exception as exc:  # noqa: BLE001
+        _mark_pipeline(pe, PipelineEvalRun.ERROR, error=f"launch failed: {exc}", finished=True)
+        raise
+
+    waited = 0
+    while waited < MAX_WAIT:
+        status = runner.fetch_pipeline_status(pe)
+        state = status.get("status")
+        if state == "ok":
+            break
+        if state == "error":
+            _mark_pipeline(pe, PipelineEvalRun.ERROR, error=status.get("log_tail", "")[-4000:],
+                           finished=True)
+            return {"status": "error"}
+        if state == "unknown":
+            if ingest.pipeline_is_complete(pe.output_dir):
+                break
+            _mark_pipeline(pe, PipelineEvalRun.ERROR,
+                           error="trainer lost the pipeline eval and wrote no result",
+                           finished=True)
+            return {"status": "error"}
+        time.sleep(POLL_INTERVAL)
+        waited += POLL_INTERVAL
+    else:
+        _mark_pipeline(pe, PipelineEvalRun.ERROR, error="timed out waiting for pipeline eval",
+                       finished=True)
+        return {"status": "error"}
+
+    return finalize_pipeline_success(pe)
+
+
+def finalize_pipeline_success(pe) -> dict:
+    """Ingest a finished pipeline eval and mark it OK. Shared with reconcile."""
+    summary = ingest.ingest_pipeline_eval(pe)
+    _mark_pipeline(pe, pe.OK, finished=True)
+    return {"status": "ok", **summary}
