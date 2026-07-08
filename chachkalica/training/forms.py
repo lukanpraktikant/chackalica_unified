@@ -28,6 +28,7 @@ def _build_field(spec: dict, arch: str) -> forms.Field:
         help_text = (help_text + f" (adapter default: {default})").strip()
 
     attrs = {"class": "xm-spec-field", "data-arch": arch}
+    attrs.update(spec.get("attrs", {}))
     common = {"required": False, "label": label, "help_text": help_text}
 
     if kind == "choice":
@@ -111,11 +112,20 @@ class ExperimentModelForm(forms.ModelForm):
         if arch == ExperimentModel.RFDETR:
             fname = model_specs.field_name(ExperimentModel.RFDETR, "resolution")
             resolution = cleaned.get(fname)
-            if resolution is not None and resolution % 56 != 0:
+            # The required multiple is patch_size * num_windows, which differs per
+            # variant (56 for base, 32 for the others). Blank variant → the adapter
+            # default (base, 56).
+            variant = cleaned.get(
+                model_specs.field_name(ExperimentModel.RFDETR, "variant")
+            ) or "base"
+            multiple = model_specs.RFDETR_VARIANT_RESOLUTION.get(
+                variant, {"multiple": 56}
+            )["multiple"]
+            if resolution is not None and resolution % multiple != 0:
                 self.add_error(
                     fname,
-                    f"RF-DETR resolution must be divisible by 56 (got {resolution}). "
-                    "Try 560, 616, 672, 728, 784, 840, or 896.",
+                    f"RF-DETR '{variant}' resolution must be divisible by {multiple} "
+                    f"(got {resolution}).",
                 )
         return cleaned
 

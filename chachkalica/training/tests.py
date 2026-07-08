@@ -233,17 +233,20 @@ class ExperimentAdminRenderTests(TestCase):
 
 
 class RFDETRResolutionValidationTests(TestCase):
-    """The admin form must reject an RF-DETR resolution not divisible by 56."""
+    """The admin form must reject an RF-DETR resolution not divisible by the
+    selected variant's patch stride (56 for base, 32 for the others)."""
 
-    def _form(self, resolution):
+    def _form(self, resolution, variant=None):
         rfield = model_specs.field_name(ExperimentModel.RFDETR, "resolution")
-        form = ExperimentModelForm(
-            data={"arch": ExperimentModel.RFDETR, "params": "{}", rfield: str(resolution)},
-            instance=ExperimentModel(),
-        )
+        vfield = model_specs.field_name(ExperimentModel.RFDETR, "variant")
+        data = {"arch": ExperimentModel.RFDETR, "params": "{}", rfield: str(resolution)}
+        if variant is not None:
+            data[vfield] = variant
+        form = ExperimentModelForm(data=data, instance=ExperimentModel())
         return form, rfield
 
     def test_rejects_non_multiple_of_56(self):
+        # Blank variant → base (multiple 56); 900 % 56 != 0.
         form, rfield = self._form(900)
         self.assertFalse(form.is_valid())
         self.assertIn(rfield, form.errors)
@@ -251,3 +254,14 @@ class RFDETRResolutionValidationTests(TestCase):
     def test_accepts_multiple_of_56(self):
         form, rfield = self._form(896)
         self.assertTrue(form.is_valid(), form.errors)
+
+    def test_accepts_nano_native_resolution(self):
+        # nano's native 384 is a multiple of 32 but not of 56 — the old validator
+        # wrongly rejected it; the per-variant multiple must accept it.
+        form, _ = self._form(384, variant="nano")
+        self.assertTrue(form.is_valid(), form.errors)
+
+    def test_rejects_non_multiple_of_32_for_nano(self):
+        form, rfield = self._form(400, variant="nano")
+        self.assertFalse(form.is_valid())
+        self.assertIn(rfield, form.errors)

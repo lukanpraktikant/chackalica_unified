@@ -14,6 +14,27 @@ one entry per selectable ``build_<arch>`` kwarg. ``key`` is the ``params`` key
 default shown as guidance (a blank field means "use the adapter default").
 """
 
+import json
+
+# Each RF-DETR variant runs at a native square resolution, and its DINOv2 backbone
+# requires the input side divisible by ``patch_size * num_windows``. Both are mirrored
+# from the rfdetr package's per-variant ModelConfig so the admin form can pre-fill the
+# resolution field on variant selection and validate a hand-typed override against the
+# right multiple (56 for base's patch-14/4 backbone, 32 for the patch-16/2 variants).
+RFDETR_VARIANT_RESOLUTION: dict[str, dict[str, int]] = {
+    "nano":   {"native": 384, "multiple": 32},
+    "small":  {"native": 512, "multiple": 32},
+    "medium": {"native": 576, "multiple": 32},
+    "base":   {"native": 560, "multiple": 56},
+    "large":  {"native": 704, "multiple": 32},
+}
+
+# variant -> native resolution, handed to the form JS so selecting a variant fills
+# the resolution field with its native value.
+RFDETR_NATIVE_RESOLUTIONS = {
+    variant: spec["native"] for variant, spec in RFDETR_VARIANT_RESOLUTION.items()
+}
+
 # RT-DETR has no ``variant`` kwarg: its backbone size is chosen by loading the
 # matching pretrained checkpoint, so the "size" dropdown writes ``weights`` (the
 # HuggingFace repo id) directly. This overrides the ``pretrained`` checkbox.
@@ -52,13 +73,16 @@ ARCH_FIELD_SPECS: dict[str, list[dict]] = {
             "key": "variant", "label": "Size / variant", "kind": "choice",
             "choices": ["nano", "small", "medium", "base", "large"],
             "default": "base",
-            "help": "RF-DETR size (all Apache-2.0). xlarge/2xlarge are non-free and rejected.",
+            "help": "RF-DETR size (all Apache-2.0). xlarge/2xlarge are non-free and rejected. "
+                    "Selecting a variant fills the resolution below with its native value.",
+            "attrs": {"data-native-resolutions": json.dumps(RFDETR_NATIVE_RESOLUTIONS)},
         },
         {
             "key": "resolution", "label": "Input resolution", "kind": "int",
-            "help": "Square input size. Must be divisible by 56 (the DINOv2 backbone's "
-                    "patch stride) — e.g. 560, 616, 672, 728, 784, 840, 896. A value that "
-                    "isn't will crash on epoch 1. Blank = the variant's native resolution.",
+            "help": "Square input size, pre-filled with the selected variant's native "
+                    "resolution. Must stay divisible by the variant's patch stride (56 for "
+                    "base, 32 for nano/small/medium/large) or it crashes on epoch 1. "
+                    "Blank = the variant's native resolution.",
         },
         {
             "key": "score_threshold", "label": "Score threshold", "kind": "float",

@@ -28,6 +28,27 @@
         return el.closest(".inline-related") || el.closest("tr") || el.closest(".form-row") || el;
     }
 
+    // Selecting an RF-DETR variant fills the resolution field with that variant's
+    // native square resolution (read from the select's data-native-resolutions map),
+    // giving the user the right starting point to edit from.
+    function fillRfdetrResolution(variantSelect) {
+        var map;
+        try {
+            map = JSON.parse(variantSelect.getAttribute("data-native-resolutions") || "{}");
+        } catch (err) {
+            return;
+        }
+        var native = map[variantSelect.value];
+        if (native === undefined) {
+            return;  // "(default)" or a custom value — leave the field alone
+        }
+        var row = rowFor(variantSelect);
+        var resInput = row.querySelector('input[id$="-xm_rfdetr_resolution"]');
+        if (resInput) {
+            resInput.value = native;
+        }
+    }
+
     function init() {
         // Skip the hidden empty-form template; real rows get cloned from it.
         document.querySelectorAll(".inline-related:not(.empty-form)").forEach(syncRow);
@@ -36,6 +57,9 @@
             var target = event.target;
             if (target && target.matches && target.matches('select[id$="-arch"]')) {
                 syncRow(rowFor(target));
+            }
+            if (target && target.matches && target.matches('select[id$="-xm_rfdetr_variant"]')) {
+                fillRfdetrResolution(target);
             }
         });
 
