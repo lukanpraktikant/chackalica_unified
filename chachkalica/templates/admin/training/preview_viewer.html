@@ -1,0 +1,146 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+<style>
+  #pv-stage { position: relative; display: inline-block; max-width: 100%; }
+  #pv-stage img { display: block; max-width: 100%; height: auto; }
+  #pv-stage canvas { position: absolute; top: 0; left: 0; pointer-events: none; }
+  #pv-controls { margin: 10px 0; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  #pv-controls .pv-group { display: flex; gap: 6px; align-items: center; }
+  #pv-status { margin: 6px 0; font-weight: 600; }
+  #pv-error { color: #ba2121; margin: 6px 0; }
+  .pv-legend span { display: inline-block; margin-right: 14px; }
+  .pv-swatch { display: inline-block; width: 12px; height: 12px; margin-right: 4px; vertical-align: middle; }
+</style>
+
+<p class="help">Model <strong>{{ model.name }}</strong> · dataset <strong>{{ dataset.name }}</strong>
+· pipeline <code>{{ pipeline }}</code> · {{ image_count }} image{{ image_count|pluralize }}.
+Use ← / → or the buttons to step through. First image may take a moment while the model loads.</p>
+
+<div id="pv-controls">
+  <div class="pv-group">
+    <button type="button" id="pv-prev" class="button">← Prev</button>
+    <input type="number" id="pv-index" value="1" min="1" max="{{ image_count }}" style="width:5em">
+    <span>/ {{ image_count }}</span>
+    <button type="button" id="pv-next" class="button">Next →</button>
+  </div>
+  <div class="pv-group">
+    <label for="pv-conf">Confidence ≥ <span id="pv-conf-val">0.25</span></label>
+    <input type="range" id="pv-conf" min="0" max="1" step="0.01" value="0.25">
+  </div>
+  <div class="pv-group">
+    <label><input type="checkbox" id="pv-gt" {% if not has_labels %}disabled{% endif %}> Show ground truth
+      {% if not has_labels %}<em>(no labels)</em>{% endif %}</label>
+  </div>
+  <div class="pv-legend">
+    <span><span class="pv-swatch" style="background:#00c853"></span>prediction</span>
+    <span><span class="pv-swatch" style="background:#ff3d00"></span>ground truth</span>
+  </div>
+</div>
+
+<div id="pv-status"></div>
+<div id="pv-error"></div>
+
+<div id="pv-stage">
+  <img id="pv-img" alt="">
+  <canvas id="pv-canvas"></canvas>
+</div>
+
+<p style="margin-top:12px"><a href="../" class="button cancel-link">Back to models</a></p>
+
+<script>
+(function () {
+  var QUERY = "{{ query|safe }}";
+  var COUNT = {{ image_count }};
+  var PRED_COLOR = "#00c853", GT_COLOR = "#ff3d00";
+
+  var img = document.getElementById("pv-img");
+  var canvas = document.getElementById("pv-canvas");
+  var ctx = canvas.getContext("2d");
+  var idxInput = document.getElementById("pv-index");
+  var confInput = document.getElementById("pv-conf");
+  var confVal = document.getElementById("pv-conf-val");
+  var gtToggle = document.getElementById("pv-gt");
+  var statusEl = document.getElementById("pv-status");
+  var errorEl = document.getElementById("pv-error");
+
+  var index = 0;            // 0-based
+  var current = null;       // latest {predictions, ground_truth}
+
+  function draw() {
+    var w = img.clientWidth, h = img.clientHeight;
+    if (!w || !h) return;
+    canvas.width = w; canvas.height = h;
+    canvas.style.width = w + "px"; canvas.style.height = h + "px";
+    ctx.clearRect(0, 0, w, h);
+    if (!current) return;
+
+    if (gtToggle.checked && current.ground_truth) {
+      current.ground_truth.forEach(function (b) { drawBox(b, w, h, GT_COLOR, b.class_name); });
+    }
+    var thr = parseFloat(confInput.value);
+    (current.predictions || []).forEach(function (b) {
+      if (b.confidence < thr) return;
+      drawBox(b, w, h, PRED_COLOR, b.class_name + " " + Math.round(b.confidence * 100) + "%");
+    });
+  }
+
+  function drawBox(b, w, h, color, label) {
+    var x = (b.cx - b.w / 2) * w, y = (b.cy - b.h / 2) * h;
+    var bw = b.w * w, bh = b.h * h;
+    ctx.lineWidth = 2; ctx.strokeStyle = color;
+    ctx.strokeRect(x, y, bw, bh);
+    if (label) {
+      ctx.font = "13px sans-serif";
+      var tw = ctx.measureText(label).width;
+      var ty = y - 16 >= 0 ? y - 16 : y;
+      ctx.fillStyle = color;
+      ctx.fillRect(x, ty, tw + 8, 16);
+      ctx.fillStyle = "#fff";
+      ctx.fillText(label, x + 4, ty + 12);
+    }
+  }
+
+  function load(i) {
+    if (i < 0 || i >= COUNT) return;
+    index = i;
+    idxInput.value = i + 1;
+    current = null;
+    errorEl.textContent = "";
+    statusEl.textContent = "Loading image " + (i + 1) + " / " + COUNT + " — running inference…";
+    img.src = "image/?" + QUERY + "&index=" + i;
+    fetch("data/?" + QUERY + "&index=" + i)
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (res) {
+        if (index !== i) return;  // superseded by a newer navigation
+        if (!res.ok) { errorEl.textContent = res.j.error || "inference failed"; statusEl.textContent = ""; return; }
+        current = res.j;
+        var np = (current.predictions || []).length, ng = (current.ground_truth || []).length;
+        statusEl.textContent = (current.image || "") + " — " + np + " prediction(s)"
+          + (gtToggle.checked ? ", " + ng + " ground-truth box(es)" : "");
+        draw();
+      })
+      .catch(function (e) { if (index === i) { errorEl.textContent = String(e); statusEl.textContent = ""; } });
+  }
+
+  img.addEventListener("load", draw);
+  window.addEventListener("resize", draw);
+  confInput.addEventListener("input", function () { confVal.textContent = confInput.value; draw(); });
+  gtToggle.addEventListener("change", draw);
+  document.getElementById("pv-prev").addEventListener("click", function () { load(index - 1); });
+  document.getElementById("pv-next").addEventListener("click", function () { load(index + 1); });
+  idxInput.addEventListener("change", function () {
+    var v = parseInt(idxInput.value, 10);
+    if (!isNaN(v)) load(Math.min(Math.max(v - 1, 0), COUNT - 1));
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.target.tagName === "INPUT") return;
+    if (e.key === "ArrowLeft") load(index - 1);
+    else if (e.key === "ArrowRight") load(index + 1);
+  });
+
+  if (COUNT > 0) load(0);
+  else statusEl.textContent = "This dataset has no images.";
+})();
+</script>
+{% endblock %}

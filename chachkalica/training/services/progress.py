@@ -67,11 +67,15 @@ def epoch_line(epoch: dict) -> str:
     """One compact human-readable line summarising an epoch."""
     train = epoch.get("train") or {}
     val = epoch.get("val") or {}
+    # val_map holds the compact per-epoch mAP summary (map50, map50_95, ...);
+    # map50 is the metric best-checkpoint selection tracks.
+    val_map = epoch.get("val_map") or {}
     lr = epoch.get("lr")
     parts = [
         f"epoch {epoch.get('epoch')}",
         f"train_loss={_fmt(train.get('loss'))}",
         f"val_loss={_fmt(val.get('loss'))}",
+        f"val_map50={_fmt(val_map.get('map50'))}",
         f"lr={lr:.2e}" if isinstance(lr, (int, float)) else "lr=—",
     ]
     if epoch.get("is_best"):

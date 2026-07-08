@@ -327,6 +327,46 @@ def write_pipeline_request(pe, ts: TrainingSettings | None = None) -> tuple[Path
     return request_path, text
 
 
+def build_preview_request(
+    tm,
+    pipeline: str,
+    image_path: str,
+    *,
+    detector_checkpoint: str = "",
+    tile_size: int | None = None,
+    overlap: float | None = None,
+    chain: list[str] | None = None,
+    score_threshold: float = 0.05,
+    ts: TrainingSettings | None = None,
+) -> dict:
+    """Assemble the ``POST /predict_image`` payload for one preview image.
+
+    Slim sibling of :func:`build_pipeline_request`: no labels/output_dir (preview
+    reads GT locally and persists nothing) and no dataset ``classes`` (prediction
+    class names come from the checkpoint). ``pipeline`` may be ``"raw"`` (run the
+    model directly) or any chachak pipeline name.
+    """
+    ts = ts or TrainingSettings.load()
+    if not tm.checkpoint_path:
+        raise ValueError(f"{tm.name}: no checkpoint path to preview.")
+    payload = {
+        "model_checkpoint": tm.checkpoint_path,
+        "image_path": image_path,
+        "pipeline": pipeline,
+        "score_threshold": score_threshold,
+        "device": ts.default_device,
+    }
+    if detector_checkpoint:
+        payload["detector_checkpoint"] = detector_checkpoint
+    if tile_size:
+        payload["tile_size"] = tile_size
+    if overlap is not None:
+        payload["overlap"] = overlap
+    if chain:
+        payload["chain"] = list(chain)
+    return payload
+
+
 def write_config(experiment: Experiment, run) -> tuple[Path, str]:
     """Generate the YAML for ``run`` and persist its paths on the run.
 

@@ -21,6 +21,7 @@ Endpoints:
     GET  /evals/{eval_id}     -> {eval_id, status, returncode, started_at, finished_at, log_tail}
     POST /pipeline            -> {pipeline_id, status, pid} (body: {pipeline_id, request_path})
     GET  /pipelines/{id}      -> {pipeline_id, status, returncode, started_at, finished_at, log_tail}
+    POST /predict_image       -> {boxes, classes}          (synchronous 1-image inference; warm model)
 
 Operational logging (what the service itself does — launches, stops, rejections,
 errors) is written under ``<repo_root>/logs/``, split three ways: ``train/`` (one
@@ -119,6 +120,14 @@ app = FastAPI(title="friendy_chachkalica trainer")
 _lock = threading.Lock()
 _jobs: dict[str, dict] = {}  # "train-{id}"/"eval-{id}" -> {proc, pid, started_at, ...}
 
+# Synchronous single-image inference (the interactive model preview) keeps ONE
+# built model warm in GPU memory between clicks. _predict_lock serializes both
+# the cache and the CUDA call so overlapping preview requests never run on the
+# GPU at once; the cache holds a single entry (rebuilding on any key change and
+# freeing the old model) to bound GPU memory.
+_predict_lock = threading.Lock()
+_predict_cache: dict = {}  # {key: {"kind", "obj", "info", "device"}}, size 1
+
 _service_log().info("service starting (max_concurrent=%s, logs=%s)", MAX_CONCURRENT, LOGS_DIR)
 
 
@@ -136,6 +145,20 @@ class EvalRequest(BaseModel):
 class PipelineRequest(BaseModel):
     pipeline_id: int
     request_path: str
+
+
+class PredictImageRequest(BaseModel):
+    """One-image, synchronous inference for the admin preview viewer."""
+
+    model_checkpoint: str
+    image_path: str
+    pipeline: str = "raw"  # "raw" (adapter only) or a chachak PIPELINE_NAMES value
+    detector_checkpoint: Optional[str] = None
+    tile_size: Optional[int] = None
+    overlap: Optional[float] = None
+    chain: Optional[list[str]] = None
+    score_threshold: Optional[float] = 0.05
+    device: str = "auto"
 
 
 def _job_status(job: dict) -> str:
@@ -391,6 +414,139 @@ def pipeline_status(pipeline_id: int):
     if job is None:
         raise HTTPException(status_code=404, detail="unknown pipeline_id")
     return {"pipeline_id": pipeline_id, **_status_payload(job)}
+
+
+def _ensure_chachak_importable() -> None:
+    """Put the repo root on sys.path so ``import chachak`` resolves in-process.
+
+    chachak lives at ``<repo_root>/chachak`` and shares this torch/CUDA env (the
+    ``/pipeline`` endpoint already spawns ``chachak/run.py`` in it). For the
+    synchronous preview we import it here instead of spawning, to keep the model
+    warm across requests.
+    """
+    root = str(HERE.parent)
+    if root not in sys.path:
+        sys.path.insert(0, root)
+
+
+def _predict_key(req: "PredictImageRequest") -> tuple:
+    return (
+        req.model_checkpoint,
+        req.detector_checkpoint or "",
+        req.pipeline,
+        req.tile_size,
+        req.overlap,
+        tuple(req.chain or []),
+        req.score_threshold,
+        req.device,
+    )
+
+
+def _build_predict_runtime(req: "PredictImageRequest", device) -> dict:
+    """Load the model (raw adapter or full chachak pipeline) for ``req``."""
+    from chachak.config import pipeline_config_from_dict
+    from chachak.infer import load_checkpoint_adapter
+    from chachak.run import build_pipeline_runtime
+
+    if req.pipeline == "raw":
+        adapter, info = load_checkpoint_adapter(req.model_checkpoint, device)
+        return {"kind": "raw", "obj": adapter, "info": info}
+
+    # chachak's PipelineConfig requires images/labels/output_dir/classes, but the
+    # single-image predict path never touches the dataloader and reads class
+    # names from the checkpoint — so these are harmless placeholders.
+    raw = {
+        "pipeline": req.pipeline,
+        "model_checkpoint": req.model_checkpoint,
+        "images": ".",
+        "labels": ".",
+        "output_dir": ".",
+        "classes": ["_"],
+        "device": req.device,
+    }
+    if req.score_threshold is not None:
+        raw["score_threshold"] = req.score_threshold
+    if req.detector_checkpoint:
+        raw["detector"] = {"checkpoint": req.detector_checkpoint}
+    tiling: dict = {}
+    if req.tile_size:
+        tiling["tile_size"] = req.tile_size
+    if req.overlap is not None:
+        tiling["overlap"] = req.overlap
+    if tiling:
+        raw["tiling"] = tiling
+    if req.chain:
+        raw["chain"] = list(req.chain)
+
+    config = pipeline_config_from_dict(raw, HERE.parent)
+    pipeline, info = build_pipeline_runtime(config, device)
+    return {"kind": "pipeline", "obj": pipeline, "info": info}
+
+
+def _get_predict_runtime(req: "PredictImageRequest") -> dict:
+    """Return the warm runtime for ``req``, (re)building on a key change.
+
+    Caller must hold ``_predict_lock``.
+    """
+    key = _predict_key(req)
+    entry = _predict_cache.get(key)
+    if entry is not None:
+        return entry
+
+    import torch
+
+    from chachak._friendy import resolve_device
+
+    _predict_cache.clear()  # size 1: drop the previous model before loading a new one
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    device = resolve_device(req.device)
+    entry = _build_predict_runtime(req, device)
+    entry["device"] = device
+    _predict_cache[key] = entry
+    return entry
+
+
+@app.post("/predict_image")
+def predict_image(req: PredictImageRequest):
+    """Run one image through the model synchronously and return its boxes.
+
+    Boxes are Friendy normalized center-xywh dicts
+    (``{cx, cy, w, h, confidence, class_id, class_name}``). The first call for a
+    given model/pipeline loads it (slow); subsequent calls reuse the warm model.
+    """
+    log = _service_log()
+    image_path = Path(req.image_path)
+    if not image_path.exists():
+        log.error("predict rejected: image not found: %s", image_path)
+        raise HTTPException(status_code=400, detail=f"image not found: {image_path}")
+    if not Path(req.model_checkpoint).exists():
+        log.error("predict rejected: checkpoint not found: %s", req.model_checkpoint)
+        raise HTTPException(
+            status_code=400, detail=f"checkpoint not found: {req.model_checkpoint}")
+
+    _ensure_chachak_importable()
+    with _predict_lock:
+        try:
+            entry = _get_predict_runtime(req)
+            from chachak.preview import predict_one, predict_one_raw
+
+            if entry["kind"] == "raw":
+                boxes = predict_one_raw(
+                    entry["obj"], entry["info"], image_path,
+                    entry["device"], req.score_threshold)
+            else:
+                boxes = predict_one(
+                    entry["obj"], entry["info"], image_path,
+                    entry["device"], req.score_threshold)
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.exception("predict failed: %s", exc)
+            raise HTTPException(status_code=500, detail=f"predict failed: {exc}")
+
+    return {"boxes": boxes, "classes": entry["info"].get("train_classes", {})}
 
 
 if __name__ == "__main__":

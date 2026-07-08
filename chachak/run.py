@@ -56,11 +56,15 @@ def _needs_detector(config) -> bool:
     return False
 
 
-def run_pipeline(config) -> Dict[str, Any]:
-    device = resolve_device(config.device)
+def build_pipeline_runtime(config, device):
+    """Load the model (and detector when needed) and build the pipeline.
 
+    Returns ``(pipeline, info)``. Shared by :func:`run_pipeline` (the batch eval
+    path) and the trainer service's synchronous single-image predict endpoint,
+    which reuses the same adapter/detector/pipeline construction but skips the
+    dataloader.
+    """
     model_adapter, info = load_checkpoint_adapter(config.model_checkpoint, device)
-    num_classes = info["num_classes"]
 
     detector = None
     if _needs_detector(config):
@@ -74,6 +78,15 @@ def run_pipeline(config) -> Dict[str, Any]:
         )
 
     pipeline = build_pipeline(config, model_adapter, device, detector)
+    return pipeline, info
+
+
+def run_pipeline(config) -> Dict[str, Any]:
+    device = resolve_device(config.device)
+
+    pipeline, info = build_pipeline_runtime(config, device)
+    num_classes = info["num_classes"]
+    detector = pipeline.detector
 
     # Build the eval dataloader through Friendy so datasets/labels load identically
     # to eval_checkpoint.py. Frames-per-batch is infer_batch_size; the model only

@@ -26,8 +26,8 @@ except ImportError:
 
 # What best-checkpoint selection tracks; stamped into checkpoints so a resume
 # can tell whether a stored best_score is comparable (older checkpoints tracked
-# val loss, where lower was better).
-BEST_METRIC = "val_map50_95"
+# val loss, where lower was better, or val mAP50-95).
+BEST_METRIC = "val_map50"
 
 
 def train_from_config(
@@ -228,8 +228,9 @@ def train_model(
             # Older checkpoints tracked best_score as val loss (lower is
             # better); comparing a mAP against it would never update the best.
             print(
-                f"[train] Resume: checkpoint tracked best_score as val loss, "
-                f"now selecting on {BEST_METRIC}; restarting best-model tracking"
+                f"[train] Resume: checkpoint tracked best_score on a different "
+                f"metric ({state.get('best_metric')!r}), now selecting on "
+                f"{BEST_METRIC}; restarting best-model tracking"
             )
             best_score = None
             best_epoch = None
@@ -283,10 +284,11 @@ def train_model(
         if scheduler is not None:
             scheduler.step()
 
-        # The best checkpoint is selected on val mAP50-95 (higher is better),
+        # The best checkpoint is selected on val mAP50 (higher is better),
         # not val loss: the summed loss mixes objectness/cls/box terms and
-        # routinely diverges from detection quality.
-        score = val_map_summary["map50_95"] if val_map_summary is not None else None
+        # routinely diverges from detection quality. mAP50 rewards finding the
+        # object at a lenient IoU rather than tight localization (mAP50-95).
+        score = val_map_summary["map50"] if val_map_summary is not None else None
         is_best = score is not None and (best_score is None or score > best_score)
         if is_best:
             best_score = score
@@ -330,6 +332,7 @@ def train_model(
             f"[train] Run {run_name} epoch {epoch} done: "
             f"train_loss={train_summary.get('loss')} "
             f"val_loss={val_summary.get('loss') if val_summary else None} "
+            f"val_map50={val_map_summary.get('map50') if val_map_summary else None} "
             f"val_map50_95={val_map_summary.get('map50_95') if val_map_summary else None} "
             f"lr={_current_lr(optimizer)} best={is_best}"
         )
@@ -342,7 +345,7 @@ def train_model(
             print(
                 f"[train] Run {run_name} early stopping at epoch {epoch}: no val "
                 f"improvement for {epochs_without_improvement} epoch(s) "
-                f"(best epoch {best_epoch}, best_val_map50_95={best_score})"
+                f"(best epoch {best_epoch}, best_val_map50={best_score})"
             )
             break
 
@@ -380,7 +383,7 @@ def train_model(
         "run_name": run_name,
         "run_dir": str(run_dir),
         "best_epoch": best_epoch,
-        "best_val_map50_95": best_score,
+        "best_val_map50": best_score,
         "best_loss": _val_loss_at_epoch(history, best_epoch),
         "last_epoch": history[-1]["epoch"] if history else config.training.epochs,
         "last_train_loss": history[-1]["train"]["loss"] if history else None,

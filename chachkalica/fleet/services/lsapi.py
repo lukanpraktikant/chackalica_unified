@@ -323,13 +323,25 @@ def image_source_dir(dataset_dir: Path) -> Path:
     return dataset_dir
 
 
+def list_dataset_images(dataset_dir: Path) -> list[Path]:
+    """Return a dataset's image files, sorted, from wherever they actually live.
+
+    The single source of truth for image *ordering* (so an image index means the
+    same file everywhere — the preview viewer relies on this). Same discovery as
+    :func:`make_tasks_from_data_root`: :func:`image_source_dir` + the shared
+    :data:`IMAGE_EXTENSIONS` filter.
+    """
+    image_dir = image_source_dir(dataset_dir)
+    return [
+        img for img in sorted(image_dir.iterdir())
+        if img.suffix.lower() in IMAGE_EXTENSIONS
+    ]
+
+
 def make_tasks_from_data_root(dataset_dir: Path, data_root: Path) -> list[dict]:
     tasks = []
-    image_dir = image_source_dir(dataset_dir)
-    dataset_relative_path = get_relative_path(image_dir, data_root)
-    for img in sorted(image_dir.iterdir()):
-        if img.suffix.lower() not in IMAGE_EXTENSIONS:
-            continue
+    for img in list_dataset_images(dataset_dir):
+        dataset_relative_path = get_relative_path(img.parent, data_root)
         image_path = quote(f"{dataset_relative_path}/{img.name}")
         tasks.append({"data": {"image": f"/data/local-files/?d={image_path}"}})
     return tasks

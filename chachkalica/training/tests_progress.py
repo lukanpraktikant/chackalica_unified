@@ -40,17 +40,20 @@ class ProgressTests(TestCase):
 
     def test_epoch_line_formats_values_and_best_marker(self):
         line = progress.epoch_line(
-            {"epoch": 3, "train": {"loss": 0.1234}, "val": {"loss": 0.099}, "lr": 1e-4, "is_best": True}
+            {"epoch": 3, "train": {"loss": 0.1234}, "val": {"loss": 0.099},
+             "val_map": {"map50": 0.777}, "lr": 1e-4, "is_best": True}
         )
         self.assertIn("epoch 3", line)
         self.assertIn("train_loss=0.1234", line)
         self.assertIn("val_loss=0.0990", line)
+        self.assertIn("val_map50=0.7770", line)
         self.assertIn("lr=1.00e-04", line)
         self.assertIn("best", line)
 
     def test_epoch_line_handles_missing_val(self):
         line = progress.epoch_line({"epoch": 1, "train": {"loss": 0.5}, "val": None, "lr": None})
         self.assertIn("val_loss=—", line)
+        self.assertIn("val_map50=—", line)
         self.assertIn("lr=—", line)
         self.assertNotIn("best", line)
 

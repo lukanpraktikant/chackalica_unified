@@ -99,3 +99,20 @@ def fetch_pipeline_status(pe, ts: TrainingSettings | None = None) -> dict:
         return {"status": "unknown"}
     resp.raise_for_status()
     return resp.json()
+
+
+# First predict call for a model loads it into GPU memory; allow well past the
+# short module TIMEOUT. Warm calls return in well under a second.
+PREDICT_TIMEOUT = 180
+
+
+def predict_image(payload: dict, ts: TrainingSettings | None = None) -> dict:
+    """Run one image through a trained model synchronously; return {boxes, classes}.
+
+    Used by the interactive model preview — the service keeps the model warm, so
+    only the first request per model/pipeline pays the load cost.
+    """
+    resp = requests.post(
+        f"{base_url(ts)}/predict_image", json=payload, timeout=PREDICT_TIMEOUT)
+    resp.raise_for_status()
+    return resp.json()

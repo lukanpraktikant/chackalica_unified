@@ -1,0 +1,81 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+<p>Preview model <strong>{{ model.name }}</strong> ({{ model.arch }}) on a dataset — run
+inference image-by-image and see the predicted boxes drawn on each picture. Nothing is saved.</p>
+<p class="help">The checkpoint and training class space come from
+<code>{{ model.checkpoint_path }}</code>. Pick <em>Raw model</em> to run the model directly on the
+whole image, or a <strong>chachak pipeline</strong> (tiling / people-crop). Detector-based
+pipelines (<code>people_detect_first</code> / <code>batch_people</code>) need a detector
+checkpoint; tiling fields are optional. Set a label source to overlay ground-truth boxes.</p>
+
+<form action="" method="post">
+  {% csrf_token %}
+  {% for pk in selected %}
+    <input type="hidden" name="{{ action_checkbox_name }}" value="{{ pk }}">
+  {% endfor %}
+  <input type="hidden" name="action" value="{{ action }}">
+  <input type="hidden" name="apply" value="1">
+
+  <p>
+    <label for="dataset">Dataset:</label>
+    <select name="dataset" id="dataset" required>
+      <option value="">— select a dataset —</option>
+      {% for d in datasets %}<option value="{{ d.pk }}">{{ d.name }}</option>{% endfor %}
+    </select>
+  </p>
+
+  <p>
+    <label for="pipeline">Pipeline:</label>
+    <select name="pipeline" id="pipeline" required>
+      {% for value, label in pipeline_choices %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+    </select>
+  </p>
+
+  <p>
+    <label for="detector_checkpoint">Detector checkpoint (for people_detect_first / batch_people):</label>
+    <input type="text" name="detector_checkpoint" id="detector_checkpoint" size="60">
+  </p>
+
+  <p>
+    <label for="tile_size">Tile size (optional):</label>
+    <input type="number" name="tile_size" id="tile_size" min="1" step="1">
+  </p>
+
+  <p>
+    <label for="overlap">Tile overlap 0–1 (optional):</label>
+    <input type="number" name="overlap" id="overlap" min="0" max="0.99" step="0.05">
+  </p>
+
+  <p>
+    <label for="score">Confidence floor (min score to run inference at):</label>
+    <input type="number" name="score" id="score" min="0" max="1" step="0.01" value="0.05">
+  </p>
+
+  <p>
+    <label for="label_source">Ground-truth label source (optional — leave blank for predictions only):</label>
+    <select name="label_source" id="label_source">
+      <option value="">— none —</option>
+      {% for value, label in label_source_choices %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+    </select>
+  </p>
+
+  <p>
+    <label for="annotator">Annotator (for annotator output):</label>
+    <select name="annotator" id="annotator">
+      <option value="">—</option>
+      {% for a in annotators %}<option value="{{ a.pk }}">{{ a.username }}</option>{% endfor %}
+    </select>
+  </p>
+
+  <p>
+    <label for="explicit_labels_path">Explicit labels path (for explicit):</label>
+    <input type="text" name="explicit_labels_path" id="explicit_labels_path" size="60">
+  </p>
+
+  <div class="submit-row">
+    <input type="submit" class="default" value="Open preview">
+    <a href="../" class="button cancel-link">Cancel</a>
+  </div>
+</form>
+{% endblock %}

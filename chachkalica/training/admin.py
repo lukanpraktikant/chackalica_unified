@@ -7,15 +7,23 @@ trainer service is a later phase — for now the action ends at a generated,
 ready-to-run config.
 """
 
+from pathlib import Path
+
 import django_rq
 from django.contrib import admin, messages
 from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
+from django.http import FileResponse, Http404, JsonResponse
+from django.shortcuts import redirect
 from django.template.response import TemplateResponse
+from django.urls import path, reverse
 from django.utils import timezone
 from django.utils.html import format_html_join
+from django.utils.http import urlencode
 
 from fleet.admin import _status_badge
 from fleet.models import Annotator, Dataset
+from fleet.services import lsapi
+from fleet.services.paths import source_root
 from training import jobs
 from training.models import (
     EvalRun,
@@ -29,7 +37,7 @@ from training.models import (
 )
 from training import model_specs
 from training.forms import ExperimentModelForm
-from training.services import config_gen, ingest, promote, teardown
+from training.services import config_gen, ingest, promote, runner, teardown
 
 
 def _queue():
@@ -366,12 +374,82 @@ class RunResultAdmin(admin.ModelAdmin):
             self.message_user(request, f"Promoted {promoted} model(s) — see Trained models.")
 
 
+def _int_or_none(raw):
+    raw = (raw or "").strip()
+    return int(raw) if raw else None
+
+
+def _float_or_none(raw):
+    raw = (raw or "").strip()
+    return float(raw) if raw else None
+
+
+def _preview_index(request, count):
+    """Parse a 0-based ``?index=`` and bound it to ``[0, count)`` or 404."""
+    if count <= 0:
+        raise Http404("dataset has no images")
+    try:
+        index = int(request.GET.get("index", 0))
+    except (TypeError, ValueError):
+        raise Http404("bad index")
+    if not 0 <= index < count:
+        raise Http404("index out of range")
+    return index
+
+
+def _preview_label_dir(request, dataset):
+    """Resolve the ground-truth label dir from the preview query, or None.
+
+    Returns None when no label source was chosen or the resolved dir is missing,
+    so the viewer can disable the GT toggle instead of erroring.
+    """
+    label_source = request.GET.get("label_source") or ""
+    if not label_source:
+        return None
+    annotator = Annotator.objects.filter(pk=request.GET.get("annotator")).first()
+    try:
+        label_dir = config_gen.resolve_label_dir(
+            dataset, label_source, annotator,
+            (request.GET.get("explicit_labels_path") or "").strip())
+    except (ValueError, FileNotFoundError):
+        return None
+    return label_dir if Path(label_dir).is_dir() else None
+
+
+def _read_gt_boxes(label_dir, image_path, class_names):
+    """Parse a YOLO ``<stem>.txt`` into normalized center-xywh GT box dicts.
+
+    Matches the pairing Friendy uses (``stem.txt`` or ``image.jpg.txt``); lines
+    are ``class_id cx cy w h`` already normalized, so they draw on the same path
+    as predictions. Extra values (polygons/OBB) beyond the first five are ignored.
+    """
+    label_dir = Path(label_dir)
+    candidates = [label_dir / f"{image_path.stem}.txt", label_dir / f"{image_path.name}.txt"]
+    label_file = next((c for c in candidates if c.exists()), None)
+    if label_file is None:
+        return []
+    boxes = []
+    for line in label_file.read_text().splitlines():
+        parts = line.split()
+        if len(parts) < 5:
+            continue
+        try:
+            class_id = int(float(parts[0]))
+            cx, cy, w, h = (float(v) for v in parts[1:5])
+        except ValueError:
+            continue
+        name = class_names[class_id] if 0 <= class_id < len(class_names) else str(class_id)
+        boxes.append({"cx": cx, "cy": cy, "w": w, "h": h,
+                      "class_id": class_id, "class_name": name})
+    return boxes
+
+
 @admin.register(TrainedModel)
 class TrainedModelAdmin(admin.ModelAdmin):
     list_display = ["name", "stage", "arch", "num_classes", "map50", "map50_95", "created_at"]
     list_filter = ["stage", "arch"]
     search_fields = ["name", "description"]
-    actions = ["evaluate_on_dataset", "evaluate_with_pipeline"]
+    actions = ["evaluate_on_dataset", "evaluate_with_pipeline", "preview_on_dataset"]
     readonly_fields = ["source_run_result", "created_at", "updated_at"]
 
     @admin.display(description="mAP50")
@@ -489,6 +567,144 @@ class TrainedModelAdmin(admin.ModelAdmin):
             "action_checkbox_name": ACTION_CHECKBOX_NAME,
         }
         return TemplateResponse(request, "admin/training/pipeline_eval_model.html", context)
+
+    # ------------------------------------------------------------------ preview
+    RAW_PIPELINE = ("raw", "Raw model (no pipeline)")
+
+    @admin.action(description="Preview model on selected dataset…")
+    def preview_on_dataset(self, request, queryset):
+        """Open the interactive box-preview viewer for one model on a dataset.
+
+        Unlike the eval actions this persists nothing — on submit it just
+        redirects to the viewer with the chosen settings as query params.
+        """
+        from eval_pipelines.models import PipelineEvalRun
+
+        if queryset.count() != 1:
+            self.message_user(request, "Select exactly one model to preview.",
+                              level=messages.WARNING)
+            return None
+        model = queryset.first()
+
+        if request.POST.get("apply"):
+            dataset = Dataset.objects.filter(pk=request.POST.get("dataset")).first()
+            if dataset is None:
+                self.message_user(request, "Choose a dataset.", level=messages.WARNING)
+                return None
+            params = {
+                "model": model.pk,
+                "dataset": dataset.pk,
+                "pipeline": request.POST.get("pipeline") or self.RAW_PIPELINE[0],
+                "detector_checkpoint": (request.POST.get("detector_checkpoint") or "").strip(),
+                "tile_size": (request.POST.get("tile_size") or "").strip(),
+                "overlap": (request.POST.get("overlap") or "").strip(),
+                "score": (request.POST.get("score") or "").strip(),
+                "label_source": request.POST.get("label_source") or "",
+                "annotator": request.POST.get("annotator") or "",
+                "explicit_labels_path": (request.POST.get("explicit_labels_path") or "").strip(),
+            }
+            query = urlencode({k: v for k, v in params.items() if v not in ("", None)})
+            return redirect(reverse("admin:training_trainedmodel_preview") + "?" + query)
+
+        context = {
+            **self.admin_site.each_context(request),
+            "title": f"Preview {model.name} on a dataset",
+            "model": model,
+            "datasets": Dataset.objects.all(),
+            "annotators": Annotator.objects.filter(status=Annotator.ACTIVE).order_by("username"),
+            "label_source_choices": PipelineEvalRun._meta.get_field("label_source").choices,
+            "pipeline_choices": [self.RAW_PIPELINE, *PipelineEvalRun.PIPELINE_CHOICES],
+            "action": "preview_on_dataset",
+            "selected": [str(model.pk)],
+            "action_checkbox_name": ACTION_CHECKBOX_NAME,
+        }
+        return TemplateResponse(request, "admin/training/preview_model.html", context)
+
+    def get_urls(self):
+        custom = [
+            path("preview/", self.admin_site.admin_view(self.preview_view),
+                 name="training_trainedmodel_preview"),
+            path("preview/image/", self.admin_site.admin_view(self.preview_image),
+                 name="training_trainedmodel_preview_image"),
+            path("preview/data/", self.admin_site.admin_view(self.preview_data),
+                 name="training_trainedmodel_preview_data"),
+        ]
+        return custom + super().get_urls()
+
+    def preview_view(self, request):
+        """Render the viewer shell; the browser pulls images + boxes per index."""
+        model = TrainedModel.objects.filter(pk=request.GET.get("model")).first()
+        dataset = Dataset.objects.filter(pk=request.GET.get("dataset")).first()
+        if model is None or dataset is None:
+            raise Http404("preview requires ?model= and ?dataset=")
+
+        images = lsapi.list_dataset_images(source_root() / dataset.name)
+        has_labels = _preview_label_dir(request, dataset) is not None
+
+        context = {
+            **self.admin_site.each_context(request),
+            "title": f"Preview {model.name} on {dataset.name}",
+            "model": model,
+            "dataset": dataset,
+            "pipeline": request.GET.get("pipeline") or self.RAW_PIPELINE[0],
+            "image_count": len(images),
+            "has_labels": has_labels,
+            "query": request.GET.urlencode(),
+        }
+        return TemplateResponse(request, "admin/training/preview_viewer.html", context)
+
+    def preview_image(self, request):
+        """Stream the raw bytes of the dataset image at ``?index=``."""
+        dataset = Dataset.objects.filter(pk=request.GET.get("dataset")).first()
+        if dataset is None:
+            raise Http404("unknown dataset")
+        images = lsapi.list_dataset_images(source_root() / dataset.name)
+        index = _preview_index(request, len(images))
+        return FileResponse(open(images[index], "rb"))
+
+    def preview_data(self, request):
+        """Run inference for one image and return predictions (+ optional GT)."""
+        model = TrainedModel.objects.filter(pk=request.GET.get("model")).first()
+        dataset = Dataset.objects.filter(pk=request.GET.get("dataset")).first()
+        if model is None or dataset is None:
+            return JsonResponse({"error": "unknown model or dataset"}, status=400)
+
+        images = lsapi.list_dataset_images(source_root() / dataset.name)
+        if not images:
+            return JsonResponse({"error": "dataset has no images"}, status=400)
+        index = _preview_index(request, len(images))
+        image_path = images[index]
+
+        score = _float_or_none(request.GET.get("score"))
+        try:
+            payload = config_gen.build_preview_request(
+                model,
+                request.GET.get("pipeline") or self.RAW_PIPELINE[0],
+                str(image_path),
+                detector_checkpoint=(request.GET.get("detector_checkpoint") or "").strip(),
+                tile_size=_int_or_none(request.GET.get("tile_size")),
+                overlap=_float_or_none(request.GET.get("overlap")),
+                score_threshold=0.05 if score is None else score,
+            )
+            result = runner.predict_image(payload)
+        except ValueError as exc:
+            return JsonResponse({"error": str(exc)}, status=400)
+        except Exception as exc:  # noqa: BLE001 — surface trainer/network errors to the viewer
+            return JsonResponse({"error": f"inference failed: {exc}"}, status=502)
+
+        label_dir = _preview_label_dir(request, dataset)
+        ground_truth = (
+            _read_gt_boxes(label_dir, image_path, config_gen.dataset_classes(dataset))
+            if label_dir is not None else []
+        )
+        return JsonResponse({
+            "predictions": result.get("boxes", []),
+            "ground_truth": ground_truth,
+            "classes": result.get("classes", {}),
+            "image": image_path.name,
+            "index": index,
+            "count": len(images),
+        })
 
 
 # EvalRun's admin lives in ``eval_pipelines.admin`` (as the "Base Eval" proxy)

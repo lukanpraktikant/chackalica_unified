@@ -114,8 +114,19 @@ def load_pipeline_config(config_path: Union[str, Path]) -> PipelineConfig:
         raw = yaml.safe_load(file) or {}
     if not isinstance(raw, dict):
         raise ValueError("Pipeline config must be a YAML mapping")
+    return pipeline_config_from_dict(raw, config_path.parent)
 
-    base_dir = config_path.parent
+
+def pipeline_config_from_dict(raw: Dict[str, Any], base_dir: Path) -> PipelineConfig:
+    """Build a :class:`PipelineConfig` from an already-parsed mapping.
+
+    Shared by :func:`load_pipeline_config` (which reads YAML first) and callers
+    that already hold a request dict (e.g. the trainer service's synchronous
+    predict endpoint). ``base_dir`` anchors relative paths.
+    """
+    if not isinstance(raw, dict):
+        raise ValueError("Pipeline config must be a mapping")
+
     pipeline = str(_require(raw, "pipeline"))
     if pipeline not in PIPELINE_NAMES:
         raise ValueError(
