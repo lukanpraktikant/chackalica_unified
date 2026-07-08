@@ -62,6 +62,7 @@ class BaseEvalAdmin(admin.ModelAdmin):
     actions = ["analyze_selected", "launch_selected", "reconcile_selected"]
     readonly_fields = [
         "trained_model", "dataset", "label_source", "annotator", "explicit_labels_path",
+        "score_threshold",
         "status", "request_yaml_path", "output_dir", "metrics", "last_error",
         "started_at", "finished_at", "created_at",
     ]
@@ -129,6 +130,7 @@ class PipelineEvalRunAdmin(admin.ModelAdmin):
     readonly_fields = [
         "trained_model", "dataset", "label_source", "annotator", "explicit_labels_path",
         "pipeline", "detector_checkpoint", "tile_width_pct", "tile_height_pct", "overlap", "chain",
+        "score_threshold",
         "status", "request_yaml_path", "output_dir", "metrics", "last_error",
         "started_at", "finished_at", "created_at",
     ]

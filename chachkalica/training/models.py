@@ -458,6 +458,16 @@ class EvalRun(models.Model):
         Annotator, on_delete=models.PROTECT, null=True, blank=True, related_name="+"
     )
     explicit_labels_path = models.CharField(max_length=1024, blank=True)
+    map_score_threshold = models.FloatField(
+        default=0.001,
+        help_text="Minimum prediction confidence kept for AP/mAP. Keep this low so mAP can "
+                  "sweep the precision-recall curve.",
+    )
+    score_threshold = models.FloatField(
+        default=0.25,
+        help_text="Operating-point confidence threshold used for precision, recall, F1, "
+                  "prediction counts, and the confusion matrix.",
+    )
 
     status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=CREATED)
     request_yaml_path = models.CharField(max_length=1024, blank=True)

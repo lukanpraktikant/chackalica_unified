@@ -100,6 +100,16 @@ class MergeTest(unittest.TestCase):
         merged = boxes.merge_predictions([a, b], 100, 100, nms_iou=0.5)
         self.assertEqual(merged.shape[0], 2)
 
+    def test_contained_box_collapses_even_when_iou_is_low(self):
+        large = torch.tensor([[0.5, 0.5, 0.6, 0.6, 0.7, 0.0]])
+        small = torch.tensor([[0.5, 0.5, 0.2, 0.2, 0.95, 0.0]])
+
+        merged = boxes.merge_predictions([large, small], 100, 100, nms_iou=0.5)
+
+        self.assertEqual(merged.shape[0], 1)
+        self.assertAlmostEqual(float(merged[0, 4]), 0.95)
+        self.assertTrue(torch.allclose(merged[0, :4], small[0, :4]))
+
     def test_min_box_size_filters_tiny_boxes(self):
         big = torch.tensor([[0.5, 0.5, 0.5, 0.5, 0.9, 0.0]])   # 50x50 px
         tiny = torch.tensor([[0.1, 0.1, 0.01, 0.01, 0.9, 0.0]])  # 1x1 px

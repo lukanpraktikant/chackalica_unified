@@ -19,19 +19,27 @@
   .ev-cmp h3 .arch { display: inline; font-size: 12px; }
   .ev-cmp .cmx-grid { display: flex; flex-wrap: wrap; gap: 26px; align-items: flex-start; }
   .ev-cmp .cmx-block { margin: 6px 0 12px; }
-  .ev-cmp table.cmx { border-collapse: collapse; }
+  /* The matrix carries its own light palette (explicit background + dark text) so the
+     class labels stay legible under the admin's dark theme too — inherited light text on
+     the pale label cells would otherwise render white-on-white. */
+  .ev-cmp table.cmx { border-collapse: collapse; background: #fff; }
   .ev-cmp table.cmx th, .ev-cmp table.cmx td {
     border: 1px solid #dcdcdc; padding: 5px 12px; text-align: right;
-    font-variant-numeric: tabular-nums;
+    font-variant-numeric: tabular-nums; color: #222; background-color: #fff;
   }
-  .ev-cmp table.cmx thead th { text-align: center; font-size: 12px; color: #555; font-weight: 600; }
-  .ev-cmp table.cmx th.corner { text-align: left; font-weight: 400; font-size: 11px; color: #999; }
-  .ev-cmp table.cmx th.rowlabel { text-align: left; background: #fafafa; }
+  .ev-cmp table.cmx thead th { text-align: center; font-size: 12px; color: #333; font-weight: 600; }
+  .ev-cmp table.cmx th.corner { text-align: left; font-weight: 400; font-size: 11px; color: #666; }
+  .ev-cmp table.cmx th.rowlabel { text-align: left; background: #f2f2f2; color: #222; }
   /* Correct detections shade green with their row share; confusions and background
      cells (misclassifications, false positives, misses) shade red. */
+  .ev-cmp table.cmx td.cmcell,
+  .ev-cmp table.cmx td.diag {
+    color: #fff !important;
+    font-weight: 700;
+  }
   .ev-cmp table.cmx td.cmcell { background: rgba(198, 40, 40, calc(var(--i) * 0.82)); }
   .ev-cmp table.cmx td.diag { background: rgba(20, 120, 55, calc(var(--i) * 0.9)); }
-  .ev-cmp table.cmx td.zero { color: #ccc; }
+  .ev-cmp table.cmx td.zero { color: #fff !important; }
   .ev-cmp .axis-note { color: #777; font-size: 12px; margin: .2em 0 0; }
 </style>
 {% endblock %}

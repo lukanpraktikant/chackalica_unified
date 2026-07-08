@@ -266,6 +266,27 @@ class EvalCompareTests(TestCase):
         self.assertTrue(cells["fast"]["is_best"])
         self.assertFalse(cells["slow"]["is_best"])
 
+        per_frame_row = next(r for r in result["overall_rows"] if r["label"] == "Eval per frame time (s)")
+        per_frame_cells = {c["model"]: cell for c, cell in zip(result["columns"], per_frame_row["cells"])}
+        self.assertIsNone(per_frame_cells["fast"]["value"])
+
+    def test_eval_per_frame_time_derived_from_eval_seconds_and_images(self):
+        from training.services import eval_analytics
+
+        slow = self._eval("slow", "yolox", {"map50": 0.5, "eval_seconds": 20.0, "num_images": 4})
+        fast = self._eval("fast", "rfdetr", {"map50": 0.4, "eval_seconds": 12.0, "num_images": 6})
+        result = eval_analytics.compare([slow, fast])
+
+        labels = [r["label"] for r in result["overall_rows"]]
+        self.assertLess(labels.index("Eval time (s)"), labels.index("Eval per frame time (s)"))
+
+        row = next(r for r in result["overall_rows"] if r["label"] == "Eval per frame time (s)")
+        cells = {c["model"]: cell for c, cell in zip(result["columns"], row["cells"])}
+        self.assertEqual(cells["slow"]["value"], 5.0)
+        self.assertEqual(cells["fast"]["value"], 2.0)
+        self.assertTrue(cells["fast"]["is_best"])
+        self.assertFalse(cells["slow"]["is_best"])
+
     def test_per_class_rows_union_classes(self):
         from training.services import eval_analytics
 

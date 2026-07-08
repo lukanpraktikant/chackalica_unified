@@ -113,16 +113,29 @@ def run_pipeline(config) -> Dict[str, Any]:
             batch_size=config.infer_batch_size,
             num_workers=config.num_workers,
             score_threshold=config.score_threshold,
+            map_score_threshold=config.map_score_threshold,
             iou_thresholds=config.iou_thresholds,
         ),
     )
     loader = build_eval_dataloader(dataset_config, experiment)
 
+    # Evaluate exactly like training/eval_checkpoint: predictions are remapped by
+    # NAME onto the eval class space, keeping only the classes both the model and
+    # the dataset share. Falling back to the eval class list when the checkpoint
+    # doesn't record its own training classes would silently mislabel every
+    # prediction whenever the model's class order differs — so we refuse instead.
+    train_classes = info["train_classes"]
+    if not train_classes:
+        raise ValueError(
+            f"Checkpoint {config.model_checkpoint} does not record its training class "
+            "names (train_dataset.classes), so predictions cannot be remapped by name "
+            "onto the eval classes. Re-train (or re-save the checkpoint) with class names."
+        )
     result = pipeline.run(
         loader,
         config.output_dir,
         num_classes=num_classes,
-        prediction_classes=info["train_classes"] or config.classes,
+        prediction_classes=train_classes,
         target_classes=config.classes,
         eval_classes=config.classes,
     )

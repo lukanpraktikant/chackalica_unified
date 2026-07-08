@@ -13,7 +13,7 @@ subprocess, mirroring ``run.py``:
     .venv/bin/python eval_checkpoint.py request.yaml
 
 Request YAML fields: checkpoint_path, images, labels, classes (list/mapping),
-output_dir, and optional name, score_threshold, iou_thresholds, batch_size,
+output_dir, and optional name, score_threshold, map_score_threshold, iou_thresholds, batch_size,
 num_workers, device.
 """
 
@@ -67,6 +67,7 @@ def eval_checkpoint(
     *,
     name: str = "eval",
     score_threshold: float = 0.001,
+    map_score_threshold: Optional[float] = None,
     iou_thresholds: Optional[List[float]] = None,
     batch_size: int = 4,
     num_workers: int = 4,
@@ -107,6 +108,7 @@ def eval_checkpoint(
     evaluation = EvaluationConfig(
         batch_size=batch_size, num_workers=num_workers,
         score_threshold=score_threshold,
+        map_score_threshold=map_score_threshold,
         iou_thresholds=iou_thresholds or EvaluationConfig().iou_thresholds,
     )
     training = TrainingConfig(batch_size=batch_size, num_workers=num_workers, device=device)
@@ -152,6 +154,7 @@ def eval_from_request(request_path: Union[str, Path]) -> Dict[str, Any]:
         output_dir=request["output_dir"],
         name=request.get("name", "eval"),
         score_threshold=request.get("score_threshold", 0.001),
+        map_score_threshold=request.get("map_score_threshold"),
         iou_thresholds=request.get("iou_thresholds"),
         batch_size=request.get("batch_size", 4),
         num_workers=request.get("num_workers", 4),

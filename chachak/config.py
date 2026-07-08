@@ -47,6 +47,7 @@ class PipelineConfig:
     infer_batch_size: int = 4
     num_workers: int = 4
     score_threshold: float = 0.001
+    map_score_threshold: Optional[float] = None
     iou_thresholds: List[float] = field(default_factory=lambda: list(_DEFAULT_IOU))
     merge_nms_iou: float = 0.5
     tiling: TilingConfig = field(default_factory=TilingConfig)
@@ -181,6 +182,10 @@ def pipeline_config_from_dict(raw: Dict[str, Any], base_dir: Path) -> PipelineCo
         infer_batch_size=int(raw.get("infer_batch_size", 4)),
         num_workers=int(raw.get("num_workers", 4)),
         score_threshold=float(raw.get("score_threshold", 0.001)),
+        map_score_threshold=(
+            None if raw.get("map_score_threshold") is None
+            else float(raw.get("map_score_threshold"))
+        ),
         iou_thresholds=iou_thresholds,
         merge_nms_iou=float(raw.get("merge_nms_iou", 0.5)),
         tiling=_parse_tiling(raw.get("tiling")),

@@ -15,7 +15,6 @@ height, confidence, class_id]`` with the box normalized to its own image.
 from typing import List, Sequence, Tuple
 
 import torch
-from torchvision.ops import batched_nms
 
 try:
     from ._friendy import clip_xyxy, xyxy_to_xywhn
@@ -161,6 +160,52 @@ def remap_local_preds_to_frame(
     return torch.cat([xywhn, preds[:, 4:6]], dim=1)
 
 
+def _class_aware_overlap_nms(
+    boxes: torch.Tensor,
+    scores: torch.Tensor,
+    classes: torch.Tensor,
+    threshold: float,
+) -> torch.Tensor:
+    """NMS that also catches near-containment duplicates from overlapping tiles."""
+    if boxes.numel() == 0:
+        return torch.zeros((0,), dtype=torch.long, device=boxes.device)
+
+    order = scores.argsort(descending=True)
+    keep = []
+    areas = (boxes[:, 2] - boxes[:, 0]).clamp(min=0) * (
+        boxes[:, 3] - boxes[:, 1]
+    ).clamp(min=0)
+
+    while order.numel() > 0:
+        current = order[0]
+        keep.append(current)
+        if order.numel() == 1:
+            break
+
+        rest = order[1:]
+        same_class = classes[rest] == classes[current]
+
+        xx1 = torch.maximum(boxes[current, 0], boxes[rest, 0])
+        yy1 = torch.maximum(boxes[current, 1], boxes[rest, 1])
+        xx2 = torch.minimum(boxes[current, 2], boxes[rest, 2])
+        yy2 = torch.minimum(boxes[current, 3], boxes[rest, 3])
+        inter = (xx2 - xx1).clamp(min=0) * (yy2 - yy1).clamp(min=0)
+
+        union = areas[current] + areas[rest] - inter
+        iou = inter / union.clamp(min=torch.finfo(boxes.dtype).eps)
+        smaller_area = torch.minimum(areas[current], areas[rest])
+        contained_overlap = inter / smaller_area.clamp(
+            min=torch.finfo(boxes.dtype).eps
+        )
+
+        duplicate = same_class & (
+            (iou >= threshold) | (contained_overlap >= threshold)
+        )
+        order = rest[~duplicate]
+
+    return torch.stack(keep).to(dtype=torch.long)
+
+
 def merge_predictions(
     preds_list: Sequence[torch.Tensor],
     frame_w: int,
@@ -191,5 +236,5 @@ def merge_predictions(
 
     scores = preds[:, 4]
     classes = preds[:, 5].to(torch.int64)
-    keep = batched_nms(boxes, scores, classes, nms_iou)
+    keep = _class_aware_overlap_nms(boxes, scores, classes, nms_iou)
     return preds[keep]

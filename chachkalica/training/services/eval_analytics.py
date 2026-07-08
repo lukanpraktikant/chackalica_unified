@@ -19,6 +19,7 @@ _METRICS = [
     ("num_targets", "# targets", None),
     ("num_images", "# images", None),
     ("eval_seconds", "Eval time (s)", False),
+    ("eval_seconds_per_frame", "Eval per frame time (s)", False),
 ]
 
 
@@ -42,6 +43,16 @@ def _column(eval_run) -> dict:
     }
 
 
+def _metric_value(metrics, key):
+    if key == "eval_seconds_per_frame":
+        eval_seconds = _num(metrics.get("eval_seconds"))
+        num_images = _num(metrics.get("num_images"))
+        if eval_seconds is None or not num_images:
+            return None
+        return eval_seconds / num_images
+    return _num(metrics.get(key))
+
+
 def _winner(values, higher_is_better) -> float | None:
     """The best numeric value in ``values``, or None if no contest applies."""
     nums = [v for v in values if v is not None]
@@ -53,7 +64,7 @@ def _winner(values, higher_is_better) -> float | None:
 def _overall_rows(columns) -> list[dict]:
     rows = []
     for key, label, higher_is_better in _METRICS:
-        values = [_num(col["metrics"].get(key)) for col in columns]
+        values = [_metric_value(col["metrics"], key) for col in columns]
         best = _winner(values, higher_is_better)
         rows.append({
             "label": label,

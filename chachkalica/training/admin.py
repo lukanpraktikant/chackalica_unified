@@ -478,20 +478,35 @@ class TrainedModelAdmin(admin.ModelAdmin):
         model = queryset.first()
 
         if request.POST.get("apply"):
-            dataset = Dataset.objects.filter(pk=request.POST.get("dataset")).first()
+            dataset = Dataset.objects.filter(pk=request.POST.get("dataset") or None).first()
             if dataset is None:
                 self.message_user(request, "Choose a dataset.", level=messages.WARNING)
                 return None
             label_source = request.POST.get("label_source") or EvalRun.SOURCE
-            annotator = Annotator.objects.filter(pk=request.POST.get("annotator")).first()
+            annotator = Annotator.objects.filter(pk=request.POST.get("annotator") or None).first()
             explicit = request.POST.get("explicit_labels_path", "")
             pipeline = (request.POST.get("pipeline") or "").strip()
+
+            def _threshold(name, default):
+                raw = (request.POST.get(name) or "").strip()
+                try:
+                    return float(raw) if raw else default
+                except ValueError:
+                    return default
+
+            def _map_score_threshold():
+                return _threshold("map_score_threshold", 0.001)
+
+            def _score_threshold():
+                return _threshold("score_threshold", 0.25)
 
             if not pipeline:
                 # No pipeline chosen — a plain EvalRun (the old "evaluate on a dataset").
                 eval_run = EvalRun.objects.create(
                     trained_model=model, dataset=dataset, label_source=label_source,
                     annotator=annotator, explicit_labels_path=explicit,
+                    map_score_threshold=_map_score_threshold(),
+                    score_threshold=_score_threshold(),
                 )
                 try:
                     config_gen.write_eval_request(eval_run)
@@ -522,6 +537,8 @@ class TrainedModelAdmin(admin.ModelAdmin):
                 tile_height_pct=_float("tile_height_pct"),
                 overlap=_float("overlap"),
                 chain=chain,
+                map_score_threshold=_map_score_threshold(),
+                score_threshold=_score_threshold(),
             )
             try:
                 config_gen.write_pipeline_request(pe)
@@ -575,7 +592,7 @@ class TrainedModelAdmin(admin.ModelAdmin):
         model = queryset.first()
 
         if request.POST.get("apply"):
-            dataset = Dataset.objects.filter(pk=request.POST.get("dataset")).first()
+            dataset = Dataset.objects.filter(pk=request.POST.get("dataset") or None).first()
             if dataset is None:
                 self.message_user(request, "Choose a dataset.", level=messages.WARNING)
                 return None

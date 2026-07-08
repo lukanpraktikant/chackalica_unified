@@ -506,6 +506,7 @@ def evaluate_map(
         all_targets,
         iou_thresholds=config.evaluation.iou_thresholds,
         score_threshold=config.evaluation.score_threshold,
+        map_score_threshold=config.evaluation.map_score_threshold,
         prediction_classes=prediction_classes,
         target_classes=target_classes,
         eval_classes=target_classes,
@@ -556,6 +557,7 @@ def predict_dataset(
         all_targets,
         iou_thresholds=config.evaluation.iou_thresholds if config is not None else None,
         score_threshold=config.evaluation.score_threshold if config is not None else 0.001,
+        map_score_threshold=config.evaluation.map_score_threshold if config is not None else None,
         num_classes=num_classes,
         prediction_classes=prediction_classes,
         target_classes=target_classes,
@@ -582,7 +584,10 @@ def _predict_with_config(
         return adapter.predict(images)
 
     try:
-        return adapter.predict(images, score_threshold=config.evaluation.score_threshold)
+        threshold = config.evaluation.map_score_threshold
+        if threshold is None:
+            threshold = config.evaluation.score_threshold
+        return adapter.predict(images, score_threshold=threshold)
     except TypeError:
         return adapter.predict(images)
 

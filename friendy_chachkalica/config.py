@@ -58,6 +58,7 @@ class EvaluationConfig:
     batch_size: Optional[int] = None
     num_workers: Optional[int] = None
     score_threshold: float = 0.001
+    map_score_threshold: Optional[float] = None
     iou_thresholds: List[float] = field(
         default_factory=lambda: [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95]
     )
@@ -443,6 +444,11 @@ def _parse_evaluation(value: Any) -> EvaluationConfig:
     if score_threshold < 0 or score_threshold > 1:
         raise ValueError("evaluation.score_threshold must be between 0 and 1")
 
+    raw_map_score_threshold = value.get("map_score_threshold")
+    map_score_threshold = None if raw_map_score_threshold is None else float(raw_map_score_threshold)
+    if map_score_threshold is not None and (map_score_threshold < 0 or map_score_threshold > 1):
+        raise ValueError("evaluation.map_score_threshold must be between 0 and 1")
+
     iou_thresholds = value.get(
         "iou_thresholds",
         [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95],
@@ -458,6 +464,7 @@ def _parse_evaluation(value: Any) -> EvaluationConfig:
         batch_size=batch_size,
         num_workers=num_workers,
         score_threshold=score_threshold,
+        map_score_threshold=map_score_threshold,
         iou_thresholds=iou_thresholds,
     )
 

@@ -5,17 +5,13 @@ import torch
 
 DEFAULT_IOU_THRESHOLDS = [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95]
 
-# The confusion matrix is built at a single, human-meaningful operating point rather
-# than the ~0.001 score floor the AP curves sweep down to: a matrix that counted every
-# faint detection would be swamped by background false positives and tell you nothing.
-CONFUSION_CONF_THRESHOLD = 0.25
-
 
 def evaluate_detection(
     predictions: Sequence[torch.Tensor],
     targets: Sequence[Dict[str, Any]],
     iou_thresholds: Optional[Iterable[float]] = None,
     score_threshold: float = 0.001,
+    map_score_threshold: Optional[float] = None,
     num_classes: Optional[int] = None,
     prediction_classes: Optional[Dict[int, str]] = None,
     target_classes: Optional[Dict[int, str]] = None,
@@ -32,9 +28,12 @@ def evaluate_detection(
     if not thresholds:
         raise ValueError('iou_thresholds must contain at least one threshold')
 
+    operating_threshold = float(score_threshold)
+    ap_score_threshold = operating_threshold if map_score_threshold is None else float(map_score_threshold)
+
     prepared_targets = [_prepare_target(target) for target in targets]
     prepared_predictions = [
-        _prepare_prediction(prediction, target, score_threshold)
+        _prepare_prediction(prediction, target, ap_score_threshold)
         for prediction, target in zip(predictions, prepared_targets)
     ]
 
@@ -75,12 +74,25 @@ def evaluate_detection(
     for threshold in thresholds:
         ap_by_threshold[threshold] = {}
 
-    # Micro P/R/F1 are reported at the confidence that maximizes micro-F1: the
-    # AP sweep keeps every prediction down to score_threshold (typically 0.001),
-    # and at that cut precision is drowned in near-zero-confidence false
-    # positives. The same operating confidence is applied to the per-class
-    # precision/recall below; AP always integrates the full curve.
-    micro = _micro_stats(prepared_predictions, prepared_targets, iou_threshold=0.5)
+    operating_prediction_count = 0
+    operating_pred_count_by_class = {class_id: 0 for class_id in class_ids}
+    for prediction in prepared_predictions:
+        keep = prediction['scores'] >= operating_threshold
+        operating_prediction_count += int(keep.sum())
+        for class_id in class_ids:
+            operating_pred_count_by_class[class_id] += int(
+                (keep & (prediction['labels'] == class_id)).sum()
+            )
+
+    # AP/mAP integrates the ranked detections down to ap_score_threshold.
+    # Precision/recall/F1 and the confusion matrix are single operating-point
+    # metrics, so they use score_threshold instead.
+    micro = _micro_stats(
+        prepared_predictions,
+        prepared_targets,
+        iou_threshold=0.5,
+        score_cut=operating_threshold,
+    )
 
     # box_iou between each prediction and its image's ground truth does not depend
     # on the IoU threshold, so precompute the best match per prediction once per
@@ -92,12 +104,12 @@ def evaluate_detection(
             class_id=class_id,
         )
         gt_count_by_class[class_id] = precomputed['gt_count']
-        pred_count_by_class[class_id] = precomputed['pred_count']
+        pred_count_by_class[class_id] = operating_pred_count_by_class.get(class_id, 0)
         for threshold in thresholds:
             stats = _class_stats_at_iou(
                 precomputed,
                 iou_threshold=threshold,
-                score_cut=micro['f1_confidence'],
+                score_cut=operating_threshold,
             )
             ap_by_threshold[threshold][class_id] = stats['ap']
             if threshold == 0.5:
@@ -127,7 +139,7 @@ def evaluate_detection(
         class_ids,
         effective_eval_classes,
         iou_threshold=confusion_iou,
-        conf_threshold=CONFUSION_CONF_THRESHOLD,
+        conf_threshold=operating_threshold,
     )
 
     return {
@@ -140,7 +152,7 @@ def evaluate_detection(
         'num_eval_classes': len(class_ids),
         'num_eval_classes_with_gt': len(classes_with_gt),
         'num_images': len(targets),
-        'num_predictions': int(sum(len(prediction['labels']) for prediction in prepared_predictions)),
+        'num_predictions': operating_prediction_count,
         'num_targets': int(sum(len(target['labels']) for target in prepared_targets)),
         'iou_thresholds': thresholds,
         'confusion_matrix': confusion,
@@ -457,14 +469,18 @@ def _first_occurrence_mask(keys: torch.Tensor) -> torch.Tensor:
     return mask
 
 
-def _micro_stats(predictions, targets, iou_threshold: float) -> Dict[str, Any]:
-    """Micro precision/recall/F1 at the confidence that maximizes micro-F1.
+def _micro_stats(
+    predictions,
+    targets,
+    iou_threshold: float,
+    score_cut: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Micro precision/recall/F1 at one confidence operating point.
 
     Every prediction gets a TP/FP verdict by greedy same-label matching in
     descending-score order (mismatched labels are masked to -1 IoU so they can
     never match). Because matching is greedy by score, a prediction's verdict
-    does not depend on where a confidence cut lands, so the whole P/R curve can
-    be swept once and the best-F1 operating point picked from it.
+    does not depend on where a confidence cut lands.
     """
     gt_total = int(sum(len(target['labels']) for target in targets))
     scores_parts = []
@@ -497,27 +513,31 @@ def _micro_stats(predictions, targets, iou_threshold: float) -> Dict[str, Any]:
         tp_parts.append(tp_flags)
 
     if not scores_parts:
-        return {'precision': 0.0, 'recall': 0.0, 'f1': 0.0, 'f1_confidence': None}
+        return {'precision': 0.0, 'recall': 0.0, 'f1': 0.0, 'f1_confidence': score_cut}
 
     scores = torch.cat(scores_parts)
     tp_flags = torch.cat(tp_parts)
     order = torch.argsort(scores, descending=True, stable=True)
     scores = scores[order]
-    tp_cumsum = torch.cumsum(tp_flags[order].float(), dim=0)
-    counts = torch.arange(1, scores.numel() + 1, dtype=torch.float32)
-    precision_curve = tp_cumsum / counts
-    recall_curve = tp_cumsum / max(gt_total, 1)
-    f1_curve = (
-        2 * precision_curve * recall_curve
-        / torch.clamp(precision_curve + recall_curve, min=1e-12)
-    )
-    best = int(torch.argmax(f1_curve))
+    tp_sorted = tp_flags[order].float()
+    if score_cut is None:
+        cut = scores.numel()
+    else:
+        cut = int((scores >= float(score_cut)).sum())
+
+    if cut == 0:
+        precision = 0.0
+        recall = 0.0
+    else:
+        tp = float(tp_sorted[:cut].sum().item())
+        precision = tp / max(cut, 1)
+        recall = tp / max(gt_total, 1)
 
     return {
-        'precision': float(precision_curve[best].item()),
-        'recall': float(recall_curve[best].item()),
-        'f1': float(f1_curve[best].item()),
-        'f1_confidence': float(scores[best].item()),
+        'precision': float(precision),
+        'recall': float(recall),
+        'f1': _f1(float(precision), float(recall)),
+        'f1_confidence': score_cut,
     }
 
 

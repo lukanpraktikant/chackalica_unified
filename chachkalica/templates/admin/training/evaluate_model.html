@@ -25,6 +25,22 @@ only that pipeline's fields are shown.</p>
   </div>
 
   <div class="form-row">
+    <label for="map_score_threshold">mAP confidence floor:</label>
+    <input type="number" name="map_score_threshold" id="map_score_threshold"
+           min="0" max="1" step="0.001" value="0.001">
+    <p class="help">Minimum prediction confidence included in AP/mAP. Keep this low so mAP
+    can sweep the precision-recall curve.</p>
+  </div>
+
+  <div class="form-row">
+    <label for="score_threshold">Operating confidence threshold:</label>
+    <input type="number" name="score_threshold" id="score_threshold"
+           min="0" max="1" step="0.001" value="0.25">
+    <p class="help">Confidence threshold for precision, recall, F1, prediction counts,
+    and the confusion matrix.</p>
+  </div>
+
+  <div class="form-row">
     <label for="pipeline">Pipeline:</label>
     <select name="pipeline" id="pipeline">
       {% for value, label in pipeline_choices %}<option value="{{ value }}">{{ label }}</option>{% endfor %}

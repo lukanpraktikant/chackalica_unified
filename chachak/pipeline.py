@@ -47,6 +47,12 @@ except ImportError:  # run as a flat script
     from infer import infer_in_chunks
 
 
+def _inference_score_threshold(config) -> float:
+    if config.map_score_threshold is not None:
+        return config.map_score_threshold
+    return config.score_threshold
+
+
 def _frame_size(image: torch.Tensor):
     """Return ``(width, height)`` of a CHW frame."""
     _, height, width = image.shape
@@ -69,7 +75,7 @@ def _tile_infer(adapter, image: torch.Tensor, config) -> List[torch.Tensor]:
     )
     tile_images = [tile for tile, _, _ in tiles]
     preds = infer_in_chunks(
-        adapter, tile_images, config.infer_batch_size, config.score_threshold
+        adapter, tile_images, config.infer_batch_size, _inference_score_threshold(config)
     )
     remapped = []
     for (_, offset, (tile_w, tile_h)), tile_preds in zip(tiles, preds):
@@ -123,7 +129,7 @@ class Pipeline:
                 crop_meta.append((offset, (crop_w, crop_h)))
 
         crop_preds = infer_in_chunks(
-            self.model_adapter, crops, config.infer_batch_size, config.score_threshold
+            self.model_adapter, crops, config.infer_batch_size, _inference_score_threshold(config)
         )
 
         per_frame: List[List[torch.Tensor]] = [[] for _ in images]
@@ -195,6 +201,7 @@ class Pipeline:
             all_targets,
             iou_thresholds=self.config.iou_thresholds,
             score_threshold=self.config.score_threshold,
+            map_score_threshold=self.config.map_score_threshold,
             num_classes=num_classes,
             prediction_classes=prediction_classes,
             target_classes=target_classes,

@@ -231,7 +231,8 @@ def build_eval_request(eval_run, output_dir: Path | str, ts: TrainingSettings | 
             ds, eval_run.label_source, eval_run.annotator, eval_run.explicit_labels_path)),
         "classes": dataset_classes(ds),
         "output_dir": str(output_dir),
-        "score_threshold": 0.001,
+        "map_score_threshold": eval_run.map_score_threshold,
+        "score_threshold": eval_run.score_threshold,
         "iou_thresholds": default_iou_thresholds(),
         "device": ts.default_device,
     }
@@ -284,7 +285,8 @@ def build_pipeline_request(pe, output_dir: Path | str, ts: TrainingSettings | No
             ds, pe.label_source, pe.annotator, pe.explicit_labels_path)),
         "classes": dataset_classes(ds),
         "output_dir": str(output_dir),
-        "score_threshold": 0.001,
+        "map_score_threshold": pe.map_score_threshold,
+        "score_threshold": pe.score_threshold,
         "iou_thresholds": default_iou_thresholds(),
         "device": ts.default_device,
     }

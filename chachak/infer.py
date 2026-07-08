@@ -36,6 +36,17 @@ def load_checkpoint_adapter(checkpoint_path: Union[str, Path], device) -> tuple:
     ``classes`` (as ``{id: name}``).
     """
     checkpoint_path = Path(checkpoint_path)
+
+    # Prefer an architecture-free ONNX artifact exported next to the checkpoint
+    # (``best.onnx`` + ``best.meta.json``). It runs via onnxruntime without
+    # rebuilding the model, so none of the training-arch packages are needed.
+    onnx_path = checkpoint_path.with_suffix(".onnx")
+    if onnx_path.exists():
+        print(f"[chachak] Using ONNX artifact: {onnx_path}")
+        from onnx_infer import load_onnx_adapter
+
+        return load_onnx_adapter(onnx_path, device)
+
     print(f"[chachak] Loading checkpoint: {checkpoint_path}")
     state = torch.load(checkpoint_path, map_location="cpu")
     model_name = state["model_name"]
