@@ -604,6 +604,7 @@ class TrainedModelAdmin(admin.ModelAdmin):
                 "tile_width_pct": (request.POST.get("tile_width_pct") or "").strip(),
                 "tile_height_pct": (request.POST.get("tile_height_pct") or "").strip(),
                 "overlap": (request.POST.get("overlap") or "").strip(),
+                "chain": (request.POST.get("chain") or "").strip(),
                 "score": (request.POST.get("score") or "").strip(),
                 "label_source": request.POST.get("label_source") or "",
                 "annotator": request.POST.get("annotator") or "",
@@ -620,6 +621,10 @@ class TrainedModelAdmin(admin.ModelAdmin):
             "annotators": Annotator.objects.filter(status=Annotator.ACTIVE).order_by("username"),
             "label_source_choices": PipelineEvalRun._meta.get_field("label_source").choices,
             "pipeline_choices": [self.RAW_PIPELINE, *PipelineEvalRun.PIPELINE_CHOICES],
+            "detector_pipelines": " ".join(sorted(PipelineEvalRun.DETECTOR_PIPELINES)),
+            "tiling_pipelines": " ".join([
+                PipelineEvalRun.BATCH_DETECT, PipelineEvalRun.BATCH_PEOPLE, PipelineEvalRun.CHAIN]),
+            "chain_pipelines": PipelineEvalRun.CHAIN,
             "action": "preview_on_dataset",
             "selected": [str(model.pk)],
             "action_checkbox_name": ACTION_CHECKBOX_NAME,
@@ -682,6 +687,10 @@ class TrainedModelAdmin(admin.ModelAdmin):
         image_path = images[index]
 
         score = _float_or_none(request.GET.get("score"))
+        chain = [
+            c.strip() for c in (request.GET.get("chain") or "").split(",")
+            if c.strip()
+        ]
         try:
             payload = config_gen.build_preview_request(
                 model,
@@ -691,6 +700,7 @@ class TrainedModelAdmin(admin.ModelAdmin):
                 tile_width_pct=_float_or_none(request.GET.get("tile_width_pct")),
                 tile_height_pct=_float_or_none(request.GET.get("tile_height_pct")),
                 overlap=_float_or_none(request.GET.get("overlap")),
+                chain=chain,
                 score_threshold=0.05 if score is None else score,
             )
             result = runner.predict_image(payload)

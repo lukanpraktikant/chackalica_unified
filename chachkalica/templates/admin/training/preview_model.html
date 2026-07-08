@@ -17,70 +17,107 @@ checkpoint; tiling fields are optional. Set a label source to overlay ground-tru
   <input type="hidden" name="action" value="{{ action }}">
   <input type="hidden" name="apply" value="1">
 
-  <p>
+  <div class="form-row">
     <label for="dataset">Dataset:</label>
     <select name="dataset" id="dataset" required>
       <option value="">— select a dataset —</option>
       {% for d in datasets %}<option value="{{ d.pk }}">{{ d.name }}</option>{% endfor %}
     </select>
-  </p>
+    <p class="help">The dataset whose images will be previewed.</p>
+  </div>
 
-  <p>
+  <div class="form-row">
     <label for="pipeline">Pipeline:</label>
     <select name="pipeline" id="pipeline" required>
       {% for value, label in pipeline_choices %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
     </select>
-  </p>
+    <p class="help">Pick raw model inference or a chachak pipeline — the fields below update to show only that pipeline's settings.</p>
+  </div>
 
-  <p>
-    <label for="detector_checkpoint">Detector checkpoint (for people_detect_first / batch_people):</label>
+  <div class="form-row" data-pipelines="{{ detector_pipelines }} {{ chain_pipelines }}">
+    <label for="detector_checkpoint">Detector checkpoint:</label>
     <input type="text" name="detector_checkpoint" id="detector_checkpoint" size="60">
-  </p>
+    <p class="help">Path to the person-detector checkpoint. Required for
+    <code>people_detect_first</code> and <code>batch_people</code> (and any chain that
+    includes them).</p>
+  </div>
 
-  <p>
-    <label for="tile_width_pct">Tile width % of image (optional):</label>
+  <div class="form-row" data-pipelines="{{ chain_pipelines }}">
+    <label for="chain">Chain:</label>
+    <input type="text" name="chain" id="chain" size="60"
+           placeholder="e.g. batch_detect, people_detect_first">
+    <p class="help">Ordered, comma-separated pipeline names to run in sequence and merge.</p>
+  </div>
+
+  <div class="form-row" data-pipelines="{{ tiling_pipelines }}">
+    <label for="tile_width_pct">Tile width %:</label>
     <input type="number" name="tile_width_pct" id="tile_width_pct" min="1" max="100" step="1">
-  </p>
+    <p class="help">Tile width as a percent (1–100) of each image's width. Leave blank to use chachak's default.</p>
+  </div>
 
-  <p>
-    <label for="tile_height_pct">Tile height % of image (optional):</label>
+  <div class="form-row" data-pipelines="{{ tiling_pipelines }}">
+    <label for="tile_height_pct">Tile height %:</label>
     <input type="number" name="tile_height_pct" id="tile_height_pct" min="1" max="100" step="1">
-  </p>
+    <p class="help">Tile height as a percent (1–100) of each image's height. Leave blank to use chachak's default.</p>
+  </div>
 
-  <p>
-    <label for="overlap">Tile overlap 0–1 (optional):</label>
+  <div class="form-row" data-pipelines="{{ tiling_pipelines }}">
+    <label for="overlap">Tile overlap:</label>
     <input type="number" name="overlap" id="overlap" min="0" max="0.99" step="0.05">
-  </p>
+    <p class="help">Fraction (0–1) by which adjacent tiles overlap. Leave blank for the default.</p>
+  </div>
 
-  <p>
-    <label for="score">Confidence floor (min score to run inference at):</label>
+  <div class="form-row">
+    <label for="score">Confidence floor:</label>
     <input type="number" name="score" id="score" min="0" max="1" step="0.01" value="0.05">
-  </p>
+    <p class="help">Minimum prediction confidence shown in the preview.</p>
+  </div>
 
-  <p>
-    <label for="label_source">Ground-truth label source (optional — leave blank for predictions only):</label>
+  <div class="form-row">
+    <label for="label_source">Ground-truth label source:</label>
     <select name="label_source" id="label_source">
       <option value="">— none —</option>
       {% for value, label in label_source_choices %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
     </select>
-  </p>
+    <p class="help">Optional labels to overlay in the viewer.</p>
+  </div>
 
-  <p>
-    <label for="annotator">Annotator (for annotator output):</label>
+  <div class="form-row">
+    <label for="annotator">Annotator:</label>
     <select name="annotator" id="annotator">
       <option value="">—</option>
       {% for a in annotators %}<option value="{{ a.pk }}">{{ a.username }}</option>{% endfor %}
     </select>
-  </p>
+    <p class="help">Only used when the ground-truth label source is annotator output.</p>
+  </div>
 
-  <p>
-    <label for="explicit_labels_path">Explicit labels path (for explicit):</label>
+  <div class="form-row">
+    <label for="explicit_labels_path">Explicit labels path:</label>
     <input type="text" name="explicit_labels_path" id="explicit_labels_path" size="60">
-  </p>
+    <p class="help">Only used when the ground-truth label source is explicit path.</p>
+  </div>
 
   <div class="submit-row">
     <input type="submit" class="default" value="Open preview">
     <a href="../" class="button cancel-link">Cancel</a>
   </div>
 </form>
+
+<script>
+  // Show only the fields the selected preview pipeline uses. Raw model preview
+  // hides all pipeline-specific rows. Rows opt in via data-pipelines.
+  (function () {
+    var sel = document.getElementById("pipeline");
+    var rows = document.querySelectorAll("[data-pipelines]");
+    function sync() {
+      var current = sel.value;
+      rows.forEach(function (row) {
+        var allowed = row.getAttribute("data-pipelines").split(/\s+/);
+        row.style.display = allowed.indexOf(current) !== -1 ? "" : "none";
+      });
+    }
+    sel.addEventListener("change", sync);
+    sync();
+  })();
+</script>
 {% endblock %}

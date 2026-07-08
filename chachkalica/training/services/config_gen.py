@@ -354,6 +354,23 @@ def build_preview_request(
     ts = ts or TrainingSettings.load()
     if not tm.checkpoint_path:
         raise ValueError(f"{tm.name}: no checkpoint path to preview.")
+    from eval_pipelines.models import PipelineEvalRun
+
+    valid_pipelines = {"raw", *(value for value, _label in PipelineEvalRun.PIPELINE_CHOICES)}
+    if pipeline not in valid_pipelines:
+        raise ValueError(f"Unknown preview pipeline: {pipeline!r}.")
+
+    chain = list(chain or [])
+    if pipeline == PipelineEvalRun.CHAIN and not chain:
+        raise ValueError("pipeline 'chain' requires at least one chain member.")
+
+    needs_detector = pipeline in PipelineEvalRun.DETECTOR_PIPELINES or (
+        pipeline == PipelineEvalRun.CHAIN
+        and any(c in PipelineEvalRun.DETECTOR_PIPELINES for c in chain)
+    )
+    if needs_detector and not detector_checkpoint:
+        raise ValueError(f"pipeline '{pipeline}' requires a detector checkpoint.")
+
     payload = {
         "model_checkpoint": tm.checkpoint_path,
         "image_path": image_path,
@@ -370,7 +387,7 @@ def build_preview_request(
     if overlap is not None:
         payload["overlap"] = overlap
     if chain:
-        payload["chain"] = list(chain)
+        payload["chain"] = chain
     return payload
 
 

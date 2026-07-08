@@ -1,58 +1,118 @@
-# Chachkalica
+# Chachkalica Unified
 
-A unified deployment of the two Chachkalica projects:
+Unified workspace for the Chachkalica annotation, training, inference, and evaluation tools.
 
-| Subfolder | What it is |
-|-----------|------------|
-| [`chachkalica/`](./chachkalica) | Django **annotator-fleet manager** — admin UI, annotation webhook receiver, RQ worker that provisions per-annotator Label Studio containers, and a `training/` app that drives the trainer over HTTP. |
-| [`friendy_chachkalica/`](./friendy_chachkalica) | FastAPI + PyTorch **training service** — config-driven object-detection training/eval (RetinaNet, RT-DETR, RF-DETR, YOLOX). |
+| Path | What it is |
+|---|---|
+| [`chachkalica/`](./chachkalica) | Django annotator-fleet manager: admin UI, annotation webhook receiver, RQ worker, per-annotator Label Studio provisioning, COCO export, and a `training/` app that talks to the trainer over HTTP. |
+| [`friendy_chachkalica/`](./friendy_chachkalica) | FastAPI + PyTorch object-detection training/evaluation service with config-driven runs for RetinaNet, RT-DETR, RF-DETR, and YOLOX. |
+| [`chachak/`](./chachak) | Stackable inference/evaluation pipelines that run trained detectors over tiled frames, people-first crops, or chained pipeline configs. |
+| [`onnx_infer/`](./onnx_infer) | Lightweight ONNX Runtime inference adapter/service code for running exported detector artifacts without the full training stack. |
 
-Each subproject keeps its own `Dockerfile` and `docker-compose.yml` and can still be
-run on its own. The top-level `docker-compose.yml` here is the **one that unites
-them** into a single stack on a shared network and shared data volume.
+Each main subproject keeps its own README, Dockerfile, and compose file where it can run independently. The root [`docker-compose.yml`](./docker-compose.yml) brings the Django fleet manager and trainer together on one shared network and one shared data mount.
 
-## Run the whole stack
+## Quick Start
+
+Prerequisites:
+
+- Docker with the Compose plugin
+- NVIDIA Container Toolkit if you want GPU-backed training
+- Datasets under [`chachkalica/data/source/`](./chachkalica/data/source) for real annotation or training work
 
 ```bash
-cp .env.example .env      # optional — defaults work out of the box
+cp .env.example .env
 docker compose up -d
 ```
 
-This starts:
+The root compose stack starts:
 
-| Service    | Role                                   | Host port |
-|------------|----------------------------------------|-----------|
-| `web`      | Django admin + webhook (Gunicorn)      | 9000      |
-| `worker`   | RQ background jobs (fleet provisioning)| —         |
-| `trainer`  | friendy_chachkalica FastAPI trainer    | 8200      |
-| `postgres` | Fleet state database                   | 5432      |
-| `redis`    | RQ job queue                           | 6379      |
+| Service | Role | Host port |
+|---|---|---|
+| `web` | Django admin + webhook, served by Gunicorn | `9000` |
+| `worker` | RQ background worker for fleet and training jobs | none |
+| `trainer` | `friendy_chachkalica` FastAPI trainer | `8201` by default |
+| `postgres` | Fleet state database | `5433` on host, `5432` in-network |
+| `redis` | RQ queue | `6379` |
 
-- Admin UI: <http://localhost:9000/admin/> ("Chachkalica Fleet")
-- Trainer health: <http://localhost:8200/health>
+Useful endpoints:
 
-`web` runs migrations and `collectstatic` on start, so first boot is ready to use.
+- Django admin: <http://localhost:9000/admin/>
+- Django health: <http://localhost:9000/health>
+- Trainer health from the host: <http://localhost:8201/health>
+- Trainer health inside the compose network: `http://trainer:8200/health`
 
-## How the two halves connect
+On startup, `web` runs migrations and `collectstatic`. The trainer defaults to host port `8201` because the compose file reserves `8200` for the in-network service port; override it with `FC_HOST_PORT` in `.env` if needed.
 
-- **HTTP:** the Django `training/` app calls the trainer at `http://trainer:8200`
-  (injected via `TRAINING_SERVICE_URL` in the compose file — no admin edit needed).
-- **Shared filesystem:** Django writes training-config YAMLs with absolute
-  `/app/data/...` paths; the trainer opens them as-is. All app containers therefore
-  bind-mount `./chachkalica/data` at `/app/data`, so those paths resolve identically
-  everywhere. See the note at the top of `docker-compose.yml`.
+## How The Stack Fits Together
 
-## GPU
+- Django owns the annotation fleet, dataset metadata, admin workflows, and training job orchestration.
+- The trainer exposes `/train`, `/eval`, `/pipeline`, run-status, and health endpoints for long-running ML jobs.
+- Django calls the trainer at `http://trainer:8200`, injected through `TRAINING_SERVICE_URL` in the root compose file.
+- Django writes training config YAMLs with absolute `/app/data/...` paths. The `web`, `worker`, and `trainer` containers all mount [`chachkalica/data/`](./chachkalica/data) at `/app/data`, so those paths resolve the same way in every container.
+- `chachak` can run trained checkpoints through pipeline configs and is included in the trainer image so the trainer can execute pipeline jobs.
+- `onnx_infer` is the lightweight runtime path for exported ONNX models and is intended to avoid depending on the full model architecture packages at inference time.
 
-The trainer runs CPU-only by default (fine for the synthetic smoke test). For real
-training, uncomment the `deploy:` block on the `trainer` service in
-`docker-compose.yml` (requires the NVIDIA Container Toolkit on the host).
+## Common Commands
 
-## Standalone use
-
-Run either half by itself from its own folder, e.g.:
+Run the unified stack:
 
 ```bash
-cd chachkalica && docker compose up -d          # fleet manager only
-cd friendy_chachkalica && docker compose up -d   # trainer only
+docker compose up -d
+docker compose logs -f web trainer worker
 ```
+
+Run only the fleet manager:
+
+```bash
+cd chachkalica
+docker compose up -d
+```
+
+Run only the trainer:
+
+```bash
+cd friendy_chachkalica
+docker compose up -d
+```
+
+Run a Chachak pipeline from the repo root:
+
+```bash
+python chachak/run.py chachak/configs/batch_detect.yaml
+```
+
+Run the Chachak unit tests in the trainer container:
+
+```bash
+docker compose run --rm -v "$PWD:/work" -w /work/chachak trainer \
+    python -m unittest discover -s tests -p "test_*.py"
+```
+
+## Documentation
+
+- [`chachkalica/README.md`](./chachkalica/README.md) - fleet manager overview, admin workflow, and Django service layout
+- [`chachkalica/manual.md`](./chachkalica/manual.md) - operations manual and recovery runbook
+- [`friendy_chachkalica/README.md`](./friendy_chachkalica/README.md) - trainer installation, config format, HTTP API, and model-adapter notes
+- [`chachak/README.md`](./chachak/README.md) - pipeline types, config usage, and test commands
+- [`onnx_infer/PLAN.md`](./onnx_infer/PLAN.md) - ONNX inference design and export contract
+
+## Data And Generated Files
+
+The repository is meant to keep code, configs, and documentation in git. Runtime data is local:
+
+- `chachkalica/data/source/` - source datasets and `classes.txt`
+- `chachkalica/data/target/` - annotation outputs
+- `chachkalica/data/training/` - generated training configs and artifacts
+- trainer `runs/` directories - checkpoints, metrics, histories, and predictions
+
+Keep large datasets, model weights, and generated run outputs out of git unless there is a specific reason to version a small fixture.
+
+## GPU Notes
+
+The root compose file includes an NVIDIA GPU reservation for the trainer. On a machine without NVIDIA Container Toolkit support, remove or comment the `trainer.deploy.resources.reservations.devices` block before running the stack. Without GPU access, model configs that use `device: auto` fall back to CPU, which is useful for smoke tests but usually too slow for real training.
+
+## License
+
+Licensed under the Apache License, Version 2.0. See [`LICENSE`](./LICENSE).
+
+Redistributions must preserve the license and applicable copyright, attribution, and NOTICE information. See [`NOTICE`](./NOTICE) for the project attribution notice.

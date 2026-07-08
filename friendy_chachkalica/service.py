@@ -546,6 +546,9 @@ def predict_image(req: PredictImageRequest):
                     entry["device"], req.score_threshold)
         except HTTPException:
             raise
+        except ValueError as exc:
+            log.warning("predict rejected: %s", exc)
+            raise HTTPException(status_code=400, detail=str(exc))
         except Exception as exc:  # noqa: BLE001
             log.exception("predict failed: %s", exc)
             raise HTTPException(status_code=500, detail=f"predict failed: {exc}")

@@ -114,5 +114,15 @@ def predict_image(payload: dict, ts: TrainingSettings | None = None) -> dict:
     """
     resp = requests.post(
         f"{base_url(ts)}/predict_image", json=payload, timeout=PREDICT_TIMEOUT)
-    resp.raise_for_status()
+    if resp.status_code >= 400:
+        detail = resp.text
+        try:
+            body = resp.json()
+        except ValueError:
+            body = None
+        if isinstance(body, dict) and body.get("detail"):
+            detail = str(body["detail"])
+        raise RuntimeError(
+            f"trainer /predict_image returned HTTP {resp.status_code}: {detail}"
+        )
     return resp.json()
