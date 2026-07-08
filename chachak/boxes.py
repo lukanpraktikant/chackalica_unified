@@ -23,17 +23,6 @@ except ImportError:  # run as a flat script
     from _friendy import clip_xyxy, xyxy_to_xywhn
 
 
-def _as_wh(tile_size) -> Tuple[int, int]:
-    """Normalize a tile-size config value to ``(width, height)`` pixels."""
-    if isinstance(tile_size, (list, tuple)):
-        width, height = int(tile_size[0]), int(tile_size[1])
-    else:
-        width = height = int(tile_size)
-    if width <= 0 or height <= 0:
-        raise ValueError(f"tile_size must be positive, got {tile_size}")
-    return width, height
-
-
 def _xywhn_to_xyxy_tensor(boxes: torch.Tensor, width: int, height: int) -> torch.Tensor:
     """Convert an ``(N, 4)`` normalized center-xywh tensor to absolute xyxy."""
     if boxes.numel() == 0:
@@ -54,41 +43,57 @@ def xywhn_preds_to_xyxy(preds: torch.Tensor, width: int, height: int) -> torch.T
 
 
 def _tile_starts(total: int, size: int, stride: int) -> List[int]:
-    """Sliding-window start offsets covering ``[0, total)`` incl. the far edge."""
-    if size >= total:
-        return [0]
-    starts = list(range(0, total - size + 1, stride))
-    if starts[-1] != total - size:
-        starts.append(total - size)
+    """Sliding-window start offsets covering ``[0, total)``.
+
+    Unlike a flush-to-border scheme, the last window is allowed to run partially
+    off the far edge — we stop as soon as a tile reaches ``total`` and leave the
+    caller to clamp that final tile to whatever pixels remain.
+    """
+    starts = []
+    start = 0
+    while True:
+        starts.append(start)
+        if start + size >= total:
+            break
+        start += stride
     return starts
 
 
 def tile_frame(
     image: torch.Tensor,
-    tile_size,
+    tile_w_frac: float,
+    tile_h_frac: float,
     overlap: float,
 ) -> List[Tuple[torch.Tensor, Tuple[int, int], Tuple[int, int]]]:
-    """Split a CHW frame into overlapping tiles.
+    """Split a CHW frame into overlapping tiles sized as a fraction of the frame.
 
-    Returns a list of ``(tile_chw, (x1, y1), (tile_w, tile_h))``. Tiles are views
+    ``tile_w_frac`` / ``tile_h_frac`` are fractions in ``(0, 1]`` of the frame's
+    width / height, so tiling is scale-invariant across differently-sized images.
+    Returns a list of ``(tile_chw, (x1, y1), (tile_w, tile_h))``; tiles are views
     into ``image``. ``overlap`` is a fraction in ``[0, 1)``; the stride is
-    ``round(tile * (1 - overlap))``. The frame's right and bottom edges are always
-    covered by clamping the last tile flush to the border.
+    ``round(tile * (1 - overlap))``. Tiles that would overflow the right/bottom
+    edge are clamped to the pixels that remain, so the last column/row is a
+    partial tile rather than a full one shifted flush to the border.
     """
+    if not 0.0 < tile_w_frac <= 1.0 or not 0.0 < tile_h_frac <= 1.0:
+        raise ValueError(
+            f"tile fractions must be in (0, 1], got ({tile_w_frac}, {tile_h_frac})"
+        )
     if not 0.0 <= overlap < 1.0:
         raise ValueError(f"overlap must be in [0, 1), got {overlap}")
     _, height, width = image.shape
-    tile_w, tile_h = _as_wh(tile_size)
-    tile_w = min(tile_w, width)
-    tile_h = min(tile_h, height)
+    tile_w = min(width, max(1, int(round(width * tile_w_frac))))
+    tile_h = min(height, max(1, int(round(height * tile_h_frac))))
     stride_x = max(1, int(round(tile_w * (1.0 - overlap))))
     stride_y = max(1, int(round(tile_h * (1.0 - overlap))))
 
     tiles = []
     for y in _tile_starts(height, tile_h, stride_y):
         for x in _tile_starts(width, tile_w, stride_x):
-            tile = image[:, y : y + tile_h, x : x + tile_w]
-            tiles.append((tile, (x, y), (tile_w, tile_h)))
+            w = min(tile_w, width - x)
+            h = min(tile_h, height - y)
+            tile = image[:, y : y + h, x : x + w]
+            tiles.append((tile, (x, y), (w, h)))
     return tiles
 
 

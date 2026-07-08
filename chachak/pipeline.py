@@ -61,7 +61,12 @@ def _tile_infer(adapter, image: torch.Tensor, config) -> List[torch.Tensor]:
     :func:`merge_predictions`.
     """
     frame_w, frame_h = _frame_size(image)
-    tiles = tile_frame(image, config.tiling.tile_size, config.tiling.overlap)
+    tiles = tile_frame(
+        image,
+        config.tiling.tile_width_pct / 100.0,
+        config.tiling.tile_height_pct / 100.0,
+        config.tiling.overlap,
+    )
     tile_images = [tile for tile, _, _ in tiles]
     preds = infer_in_chunks(
         adapter, tile_images, config.infer_batch_size, config.score_threshold
@@ -251,7 +256,12 @@ class BatchPeoplePipeline(Pipeline):
         person_boxes = []
         for image in images:
             frame_w, frame_h = _frame_size(image)
-            tiles = tile_frame(image, config.tiling.tile_size, config.tiling.overlap)
+            tiles = tile_frame(
+                image,
+                config.tiling.tile_width_pct / 100.0,
+                config.tiling.tile_height_pct / 100.0,
+                config.tiling.overlap,
+            )
             tile_images = [tile for tile, _, _ in tiles]
             det_preds = self.detector.predict(tile_images)
             remapped = []

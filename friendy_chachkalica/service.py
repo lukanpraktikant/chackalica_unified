@@ -154,7 +154,8 @@ class PredictImageRequest(BaseModel):
     image_path: str
     pipeline: str = "raw"  # "raw" (adapter only) or a chachak PIPELINE_NAMES value
     detector_checkpoint: Optional[str] = None
-    tile_size: Optional[int] = None
+    tile_width_pct: Optional[float] = None
+    tile_height_pct: Optional[float] = None
     overlap: Optional[float] = None
     chain: Optional[list[str]] = None
     score_threshold: Optional[float] = 0.05
@@ -434,7 +435,8 @@ def _predict_key(req: "PredictImageRequest") -> tuple:
         req.model_checkpoint,
         req.detector_checkpoint or "",
         req.pipeline,
-        req.tile_size,
+        req.tile_width_pct,
+        req.tile_height_pct,
         req.overlap,
         tuple(req.chain or []),
         req.score_threshold,
@@ -469,8 +471,10 @@ def _build_predict_runtime(req: "PredictImageRequest", device) -> dict:
     if req.detector_checkpoint:
         raw["detector"] = {"checkpoint": req.detector_checkpoint}
     tiling: dict = {}
-    if req.tile_size:
-        tiling["tile_size"] = req.tile_size
+    if req.tile_width_pct:
+        tiling["tile_width_pct"] = req.tile_width_pct
+    if req.tile_height_pct:
+        tiling["tile_height_pct"] = req.tile_height_pct
     if req.overlap is not None:
         tiling["overlap"] = req.overlap
     if tiling:

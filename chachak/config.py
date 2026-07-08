@@ -17,7 +17,8 @@ _DEFAULT_IOU = [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95]
 
 @dataclass(frozen=True)
 class TilingConfig:
-    tile_size: Union[int, List[int]] = 640
+    tile_width_pct: float = 50.0
+    tile_height_pct: float = 50.0
     overlap: float = 0.2
     nms_iou: float = 0.5
 
@@ -82,8 +83,17 @@ def _parse_tiling(raw: Any) -> TilingConfig:
     overlap = float(raw.get("overlap", defaults.overlap))
     if not 0.0 <= overlap < 1.0:
         raise ValueError("tiling.overlap must be in [0, 1)")
+    tile_width_pct = float(raw.get("tile_width_pct", defaults.tile_width_pct))
+    tile_height_pct = float(raw.get("tile_height_pct", defaults.tile_height_pct))
+    for label, value in (
+        ("tile_width_pct", tile_width_pct),
+        ("tile_height_pct", tile_height_pct),
+    ):
+        if not 0.0 < value <= 100.0:
+            raise ValueError(f"tiling.{label} must be in (0, 100]")
     return TilingConfig(
-        tile_size=raw.get("tile_size", defaults.tile_size),
+        tile_width_pct=tile_width_pct,
+        tile_height_pct=tile_height_pct,
         overlap=overlap,
         nms_iou=float(raw.get("nms_iou", defaults.nms_iou)),
     )

@@ -14,7 +14,14 @@ from django.template.response import TemplateResponse
 from fleet.admin import _status_badge
 from training import jobs
 
-from eval_pipelines.models import BaseEval, PipelineEvalRun
+from eval_pipelines.models import (
+    BaseEval,
+    BatchDetectEval,
+    BatchPeopleEval,
+    ChainEval,
+    PeopleDetectFirstEval,
+    PipelineEvalRun,
+)
 
 
 def _queue():
@@ -105,15 +112,23 @@ class BaseEvalAdmin(admin.ModelAdmin):
             self.message_user(request, f"Eval #{eval_run.pk}: {outcome}")
 
 
-@admin.register(PipelineEvalRun)
 class PipelineEvalRunAdmin(admin.ModelAdmin):
-    list_display = ["__str__", "trained_model", "pipeline", "dataset", "status_badge",
+    """Shared admin for the per-pipeline proxies (Batch detect, Chain, …).
+
+    Not registered against the concrete :class:`PipelineEvalRun` itself — each
+    pipeline type gets its own list via a proxy subclass registered below, so a
+    run lands under the list matching the pipeline chosen in the "Evaluate with
+    a pipeline…" action. ``pipeline`` is dropped from the columns/filters since
+    every row in a given list shares it.
+    """
+
+    list_display = ["__str__", "trained_model", "dataset", "status_badge",
                     "map50", "map50_95", "eval_time", "created_at"]
-    list_filter = ["status", "pipeline", "trained_model"]
+    list_filter = ["status", "trained_model"]
     actions = ["analyze_selected", "launch_selected", "reconcile_selected"]
     readonly_fields = [
         "trained_model", "dataset", "label_source", "annotator", "explicit_labels_path",
-        "pipeline", "detector_checkpoint", "tile_size", "overlap", "chain",
+        "pipeline", "detector_checkpoint", "tile_width_pct", "tile_height_pct", "overlap", "chain",
         "status", "request_yaml_path", "output_dir", "metrics", "last_error",
         "started_at", "finished_at", "created_at",
     ]
@@ -162,3 +177,25 @@ class PipelineEvalRunAdmin(admin.ModelAdmin):
         for pe in queryset:
             outcome = reconcile.reconcile_pipeline(pe)
             self.message_user(request, f"Pipeline eval #{pe.pk}: {outcome}")
+
+
+@admin.register(PipelineEvalRun)
+class AllPipelineEvalAdmin(PipelineEvalRunAdmin):
+    """The combined "All pipeline evals" list — every pipeline in one place.
+
+    Unlike the per-pipeline lists this spans pipelines, so it restores the
+    ``pipeline`` column and filter and lets "Analyze / compare" span pipeline
+    types (and, with Base Eval, compare a pipeline run against the raw model).
+    """
+
+    list_display = ["__str__", "trained_model", "pipeline", "dataset", "status_badge",
+                    "map50", "map50_95", "eval_time", "created_at"]
+    list_filter = ["status", "pipeline", "trained_model"]
+
+
+# One admin list per pipeline type, all sharing the behaviour above. Each proxy's
+# manager scopes the queryset to its pipeline, so these lists partition the runs.
+admin.site.register(BatchDetectEval, PipelineEvalRunAdmin)
+admin.site.register(PeopleDetectFirstEval, PipelineEvalRunAdmin)
+admin.site.register(BatchPeopleEval, PipelineEvalRunAdmin)
+admin.site.register(ChainEval, PipelineEvalRunAdmin)

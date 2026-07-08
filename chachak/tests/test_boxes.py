@@ -21,7 +21,8 @@ import boxes  # noqa: E402
 class TileFrameTest(unittest.TestCase):
     def test_tiles_cover_whole_frame_including_edges(self):
         image = torch.zeros((3, 100, 100))
-        tiles = boxes.tile_frame(image, tile_size=40, overlap=0.25)
+        # 40% of 100 -> 40px tiles.
+        tiles = boxes.tile_frame(image, 0.4, 0.4, overlap=0.25)
 
         covered = torch.zeros((100, 100), dtype=torch.bool)
         for _, (x, y), (w, h) in tiles:
@@ -30,15 +31,17 @@ class TileFrameTest(unittest.TestCase):
             covered[y : y + h, x : x + w] = True
         self.assertTrue(bool(covered.all()), "tiles must cover every pixel")
 
-    def test_tile_smaller_than_frame_produces_multiple_tiles(self):
+    def test_edge_tiles_are_clamped_partial_not_flush(self):
         image = torch.zeros((3, 100, 100))
-        tiles = boxes.tile_frame(image, tile_size=40, overlap=0.0)
-        # stride 40 over 100 -> starts [0, 40, 60] per axis -> 9 tiles
+        # 40px tiles, stride 40 -> starts [0, 40, 80]; the 80 tile runs partial (w=20).
+        tiles = boxes.tile_frame(image, 0.4, 0.4, overlap=0.0)
         self.assertEqual(len(tiles), 9)
+        widths = sorted({w for _, _, (w, _) in tiles})
+        self.assertEqual(widths, [20, 40])
 
-    def test_tile_larger_than_frame_is_single_full_tile(self):
+    def test_tile_full_size_is_single_full_tile(self):
         image = torch.zeros((3, 50, 80))
-        tiles = boxes.tile_frame(image, tile_size=200, overlap=0.2)
+        tiles = boxes.tile_frame(image, 1.0, 1.0, overlap=0.2)
         self.assertEqual(len(tiles), 1)
         _, (x, y), (w, h) = tiles[0]
         self.assertEqual((x, y, w, h), (0, 0, 80, 50))
@@ -46,7 +49,14 @@ class TileFrameTest(unittest.TestCase):
     def test_rejects_out_of_range_overlap(self):
         image = torch.zeros((3, 100, 100))
         with self.assertRaises(ValueError):
-            boxes.tile_frame(image, tile_size=40, overlap=1.0)
+            boxes.tile_frame(image, 0.4, 0.4, overlap=1.0)
+
+    def test_rejects_out_of_range_fraction(self):
+        image = torch.zeros((3, 100, 100))
+        with self.assertRaises(ValueError):
+            boxes.tile_frame(image, 0.0, 0.4, overlap=0.2)
+        with self.assertRaises(ValueError):
+            boxes.tile_frame(image, 0.4, 1.5, overlap=0.2)
 
 
 class RemapTest(unittest.TestCase):

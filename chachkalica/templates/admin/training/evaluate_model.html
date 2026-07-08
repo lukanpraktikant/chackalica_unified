@@ -1,0 +1,124 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+<p>Evaluate model <strong>{{ model.name }}</strong> ({{ model.arch }}) against a dataset.</p>
+<p class="help">The model's checkpoint and training class space come from
+<code>{{ model.checkpoint_path }}</code>. Leave <em>Pipeline</em> blank for a plain
+evaluation, or choose one to run the model through a <strong>chachak pipeline</strong> —
+only that pipeline's fields are shown.</p>
+
+<form action="" method="post">
+  {% csrf_token %}
+  {% for pk in selected %}
+    <input type="hidden" name="{{ action_checkbox_name }}" value="{{ pk }}">
+  {% endfor %}
+  <input type="hidden" name="action" value="{{ action }}">
+  <input type="hidden" name="apply" value="1">
+
+  <div class="form-row">
+    <label for="dataset">Dataset:</label>
+    <select name="dataset" id="dataset" required>
+      <option value="">— select a dataset —</option>
+      {% for d in datasets %}<option value="{{ d.pk }}">{{ d.name }}</option>{% endfor %}
+    </select>
+    <p class="help">The dataset whose labels the model's predictions are scored against.</p>
+  </div>
+
+  <div class="form-row">
+    <label for="pipeline">Pipeline:</label>
+    <select name="pipeline" id="pipeline">
+      {% for value, label in pipeline_choices %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+    </select>
+    <p class="help">Leave blank to evaluate the raw model directly. Pick a chachak
+    pipeline to run the model through it instead — the fields below update to show
+    only that pipeline's settings.</p>
+  </div>
+
+  <div class="form-row" data-pipelines="{{ detector_pipelines }} {{ chain_pipelines }}">
+    <label for="detector_checkpoint">Detector checkpoint:</label>
+    <input type="text" name="detector_checkpoint" id="detector_checkpoint" size="60">
+    <p class="help">Path to the person-detector checkpoint. Required for
+    <code>people_detect_first</code> and <code>batch_people</code> (and any chain that
+    includes them); the pipeline crops around detected people before running the model.</p>
+  </div>
+
+  <div class="form-row" data-pipelines="{{ chain_pipelines }}">
+    <label for="chain">Chain:</label>
+    <input type="text" name="chain" id="chain" size="60"
+           placeholder="e.g. batch_detect, people_detect_first">
+    <p class="help">Ordered, comma-separated pipeline names to run in sequence and merge
+    the results of, e.g. <code>batch_detect, people_detect_first</code>.</p>
+  </div>
+
+  <div class="form-row" data-pipelines="{{ tiling_pipelines }}">
+    <label for="tile_width_pct">Tile width %:</label>
+    <input type="number" name="tile_width_pct" id="tile_width_pct" min="1" max="100" step="1">
+    <p class="help">Tile width as a percent (1–100) of each image's width, so tiling scales
+    with resolution — smaller tiles help find small objects. Edge tiles that would overflow
+    are clamped to whatever's left. Leave blank to use chachak's default.</p>
+  </div>
+
+  <div class="form-row" data-pipelines="{{ tiling_pipelines }}">
+    <label for="tile_height_pct">Tile height %:</label>
+    <input type="number" name="tile_height_pct" id="tile_height_pct" min="1" max="100" step="1">
+    <p class="help">Tile height as a percent (1–100) of each image's height. Leave blank to
+    use chachak's default.</p>
+  </div>
+
+  <div class="form-row" data-pipelines="{{ tiling_pipelines }}">
+    <label for="overlap">Tile overlap:</label>
+    <input type="number" name="overlap" id="overlap" min="0" max="0.99" step="0.05">
+    <p class="help">Fraction (0–1) by which adjacent tiles overlap, so objects on a tile
+    seam aren't cut in half and missed. Leave blank for the default.</p>
+  </div>
+
+  <div class="form-row">
+    <label for="label_source">Label source:</label>
+    <select name="label_source" id="label_source">
+      {% for value, label in label_source_choices %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+    </select>
+    <p class="help">Where the ground-truth labels come from: the dataset's own source
+    labels, a specific annotator's output, or an explicit labels path.</p>
+  </div>
+
+  <div class="form-row">
+    <label for="annotator">Annotator:</label>
+    <select name="annotator" id="annotator">
+      <option value="">—</option>
+      {% for a in annotators %}<option value="{{ a.pk }}">{{ a.username }}</option>{% endfor %}
+    </select>
+    <p class="help">Which annotator's output to score against. Only used when
+    <em>Label source</em> is set to “annotator output”.</p>
+  </div>
+
+  <div class="form-row">
+    <label for="explicit_labels_path">Explicit labels path:</label>
+    <input type="text" name="explicit_labels_path" id="explicit_labels_path" size="60">
+    <p class="help">Filesystem path to a labels directory to score against. Only used when
+    <em>Label source</em> is set to “explicit path”.</p>
+  </div>
+
+  <div class="submit-row">
+    <input type="submit" class="default" value="Queue evaluation">
+    <a href="../" class="button cancel-link">Cancel</a>
+  </div>
+</form>
+
+<script>
+  // Show only the fields the selected pipeline uses; a blank pipeline (regular
+  // eval) hides all pipeline-specific rows. Rows opt in via data-pipelines.
+  (function () {
+    var sel = document.getElementById("pipeline");
+    var rows = document.querySelectorAll("[data-pipelines]");
+    function sync() {
+      var current = sel.value;
+      rows.forEach(function (row) {
+        var allowed = row.getAttribute("data-pipelines").split(/\s+/);
+        row.style.display = allowed.indexOf(current) !== -1 ? "" : "none";
+      });
+    }
+    sel.addEventListener("change", sync);
+    sync();
+  })();
+</script>
+{% endblock %}

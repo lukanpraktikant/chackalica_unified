@@ -77,11 +77,14 @@ class PipelineRequestTests(TestCase):
         pe = self._make(
             pipeline=PipelineEvalRun.BATCH_PEOPLE,
             detector_checkpoint="/models/person.pt",
-            tile_size=512, overlap=0.25,
+            tile_width_pct=25, tile_height_pct=40, overlap=0.25,
         )
         req = config_gen.build_pipeline_request(pe, "/out/pipeline-3")
         self.assertEqual(req["detector"], {"checkpoint": "/models/person.pt"})
-        self.assertEqual(req["tiling"], {"tile_size": 512, "overlap": 0.25})
+        self.assertEqual(
+            req["tiling"],
+            {"tile_width_pct": 25, "tile_height_pct": 40, "overlap": 0.25},
+        )
 
     def test_chain_pipeline_carries_children(self):
         pe = self._make(

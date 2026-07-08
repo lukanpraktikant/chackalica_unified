@@ -374,11 +374,6 @@ class RunResultAdmin(admin.ModelAdmin):
             self.message_user(request, f"Promoted {promoted} model(s) — see Trained models.")
 
 
-def _int_or_none(raw):
-    raw = (raw or "").strip()
-    return int(raw) if raw else None
-
-
 def _float_or_none(raw):
     raw = (raw or "").strip()
     return float(raw) if raw else None
@@ -449,7 +444,7 @@ class TrainedModelAdmin(admin.ModelAdmin):
     list_display = ["name", "stage", "arch", "num_classes", "map50", "map50_95", "created_at"]
     list_filter = ["stage", "arch"]
     search_fields = ["name", "description"]
-    actions = ["evaluate_on_dataset", "evaluate_with_pipeline", "preview_on_dataset"]
+    actions = ["evaluate", "preview_on_dataset"]
     readonly_fields = ["source_run_result", "created_at", "updated_at"]
 
     @admin.display(description="mAP50")
@@ -460,52 +455,20 @@ class TrainedModelAdmin(admin.ModelAdmin):
     def map50_95(self, obj):
         return obj.metrics.get("map50_95") if isinstance(obj.metrics, dict) else None
 
-    @admin.action(description="Evaluate on a dataset…")
-    def evaluate_on_dataset(self, request, queryset):
-        if queryset.count() != 1:
-            self.message_user(request, "Select exactly one model to evaluate.",
-                              level=messages.WARNING)
-            return None
-        model = queryset.first()
+    # Field visibility per pipeline (the template shows/hides these). A regular
+    # eval (blank pipeline) shows none of them; keep this in sync with
+    # ``config_gen.build_pipeline_request`` and ``PipelineEvalRun.DETECTOR_PIPELINES``.
+    NO_PIPELINE = ("", "No pipeline — regular eval")
 
-        if request.POST.get("apply"):
-            dataset = Dataset.objects.filter(pk=request.POST.get("dataset")).first()
-            if dataset is None:
-                self.message_user(request, "Choose a dataset.", level=messages.WARNING)
-                return None
-            label_source = request.POST.get("label_source") or EvalRun.SOURCE
-            annotator = Annotator.objects.filter(pk=request.POST.get("annotator")).first()
-            eval_run = EvalRun.objects.create(
-                trained_model=model, dataset=dataset, label_source=label_source,
-                annotator=annotator, explicit_labels_path=request.POST.get("explicit_labels_path", ""),
-            )
-            try:
-                config_gen.write_eval_request(eval_run)
-            except (ValueError, FileNotFoundError, RuntimeError) as exc:
-                eval_run.delete()
-                self.message_user(request, f"Cannot build eval request: {exc}", level=messages.ERROR)
-                return None
-            _queue().enqueue(jobs.run_eval, eval_run.pk, job_timeout=jobs.JOB_TIMEOUT)
-            eval_run.status = EvalRun.QUEUED
-            eval_run.save(update_fields=["status"])
-            self.message_user(request, f"Eval #{eval_run.pk} queued for {model.name} on {dataset.name}.")
-            return None
+    @admin.action(description="Evaluate…")
+    def evaluate(self, request, queryset):
+        """Evaluate one model — optionally through a chachak pipeline.
 
-        context = {
-            **self.admin_site.each_context(request),
-            "title": f"Evaluate {model.name}",
-            "model": model,
-            "datasets": Dataset.objects.all(),
-            "annotators": Annotator.objects.filter(status=Annotator.ACTIVE).order_by("username"),
-            "label_source_choices": EvalRun._meta.get_field("label_source").choices,
-            "action": "evaluate_on_dataset",
-            "selected": [str(model.pk)],
-            "action_checkbox_name": ACTION_CHECKBOX_NAME,
-        }
-        return TemplateResponse(request, "admin/training/eval_model.html", context)
-
-    @admin.action(description="Evaluate with a pipeline…")
-    def evaluate_with_pipeline(self, request, queryset):
+        Merges the old "Evaluate on a dataset" and "Evaluate with a pipeline"
+        actions: leave *Pipeline* blank for a plain :class:`EvalRun`, or pick one
+        to create a :class:`PipelineEvalRun`. The form renders only the knobs the
+        chosen pipeline uses (detector / tiling / chain).
+        """
         from eval_pipelines.models import PipelineEvalRun
 
         if queryset.count() != 1:
@@ -519,25 +482,46 @@ class TrainedModelAdmin(admin.ModelAdmin):
             if dataset is None:
                 self.message_user(request, "Choose a dataset.", level=messages.WARNING)
                 return None
-            pipeline = request.POST.get("pipeline") or PipelineEvalRun.BATCH_DETECT
-            label_source = request.POST.get("label_source") or PipelineEvalRun.SOURCE
+            label_source = request.POST.get("label_source") or EvalRun.SOURCE
             annotator = Annotator.objects.filter(pk=request.POST.get("annotator")).first()
+            explicit = request.POST.get("explicit_labels_path", "")
+            pipeline = (request.POST.get("pipeline") or "").strip()
 
-            def _int(name):
-                raw = (request.POST.get(name) or "").strip()
-                return int(raw) if raw else None
+            if not pipeline:
+                # No pipeline chosen — a plain EvalRun (the old "evaluate on a dataset").
+                eval_run = EvalRun.objects.create(
+                    trained_model=model, dataset=dataset, label_source=label_source,
+                    annotator=annotator, explicit_labels_path=explicit,
+                )
+                try:
+                    config_gen.write_eval_request(eval_run)
+                except (ValueError, FileNotFoundError, RuntimeError) as exc:
+                    eval_run.delete()
+                    self.message_user(request, f"Cannot build eval request: {exc}",
+                                      level=messages.ERROR)
+                    return None
+                _queue().enqueue(jobs.run_eval, eval_run.pk, job_timeout=jobs.JOB_TIMEOUT)
+                eval_run.status = EvalRun.QUEUED
+                eval_run.save(update_fields=["status"])
+                self.message_user(
+                    request, f"Eval #{eval_run.pk} queued for {model.name} on {dataset.name}.")
+                return None
 
+            # A pipeline was chosen — a PipelineEvalRun.
             def _float(name):
                 raw = (request.POST.get(name) or "").strip()
                 return float(raw) if raw else None
 
+            chain = [c.strip() for c in (request.POST.get("chain") or "").split(",") if c.strip()]
             pe = PipelineEvalRun.objects.create(
                 trained_model=model, dataset=dataset, label_source=label_source,
-                annotator=annotator,
-                explicit_labels_path=request.POST.get("explicit_labels_path", ""),
+                annotator=annotator, explicit_labels_path=explicit,
                 pipeline=pipeline,
                 detector_checkpoint=(request.POST.get("detector_checkpoint") or "").strip(),
-                tile_size=_int("tile_size"), overlap=_float("overlap"),
+                tile_width_pct=_float("tile_width_pct"),
+                tile_height_pct=_float("tile_height_pct"),
+                overlap=_float("overlap"),
+                chain=chain,
             )
             try:
                 config_gen.write_pipeline_request(pe)
@@ -556,17 +540,21 @@ class TrainedModelAdmin(admin.ModelAdmin):
 
         context = {
             **self.admin_site.each_context(request),
-            "title": f"Evaluate {model.name} with a pipeline",
+            "title": f"Evaluate {model.name}",
             "model": model,
             "datasets": Dataset.objects.all(),
             "annotators": Annotator.objects.filter(status=Annotator.ACTIVE).order_by("username"),
             "label_source_choices": PipelineEvalRun._meta.get_field("label_source").choices,
-            "pipeline_choices": PipelineEvalRun.PIPELINE_CHOICES,
-            "action": "evaluate_with_pipeline",
+            "pipeline_choices": [self.NO_PIPELINE, *PipelineEvalRun.PIPELINE_CHOICES],
+            "detector_pipelines": " ".join(sorted(PipelineEvalRun.DETECTOR_PIPELINES)),
+            "tiling_pipelines": " ".join([
+                PipelineEvalRun.BATCH_DETECT, PipelineEvalRun.BATCH_PEOPLE, PipelineEvalRun.CHAIN]),
+            "chain_pipelines": PipelineEvalRun.CHAIN,
+            "action": "evaluate",
             "selected": [str(model.pk)],
             "action_checkbox_name": ACTION_CHECKBOX_NAME,
         }
-        return TemplateResponse(request, "admin/training/pipeline_eval_model.html", context)
+        return TemplateResponse(request, "admin/training/evaluate_model.html", context)
 
     # ------------------------------------------------------------------ preview
     RAW_PIPELINE = ("raw", "Raw model (no pipeline)")
@@ -596,7 +584,8 @@ class TrainedModelAdmin(admin.ModelAdmin):
                 "dataset": dataset.pk,
                 "pipeline": request.POST.get("pipeline") or self.RAW_PIPELINE[0],
                 "detector_checkpoint": (request.POST.get("detector_checkpoint") or "").strip(),
-                "tile_size": (request.POST.get("tile_size") or "").strip(),
+                "tile_width_pct": (request.POST.get("tile_width_pct") or "").strip(),
+                "tile_height_pct": (request.POST.get("tile_height_pct") or "").strip(),
                 "overlap": (request.POST.get("overlap") or "").strip(),
                 "score": (request.POST.get("score") or "").strip(),
                 "label_source": request.POST.get("label_source") or "",
@@ -682,7 +671,8 @@ class TrainedModelAdmin(admin.ModelAdmin):
                 request.GET.get("pipeline") or self.RAW_PIPELINE[0],
                 str(image_path),
                 detector_checkpoint=(request.GET.get("detector_checkpoint") or "").strip(),
-                tile_size=_int_or_none(request.GET.get("tile_size")),
+                tile_width_pct=_float_or_none(request.GET.get("tile_width_pct")),
+                tile_height_pct=_float_or_none(request.GET.get("tile_height_pct")),
                 overlap=_float_or_none(request.GET.get("overlap")),
                 score_threshold=0.05 if score is None else score,
             )

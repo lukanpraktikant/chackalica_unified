@@ -73,7 +73,14 @@ class PipelineEvalRun(models.Model):
         max_length=1024, blank=True,
         help_text="Person-detector checkpoint; required for people_detect_first / batch_people.",
     )
-    tile_size = models.PositiveIntegerField(null=True, blank=True)
+    tile_width_pct = models.FloatField(
+        null=True, blank=True,
+        help_text="Tile width as a percent (0–100] of each image's width.",
+    )
+    tile_height_pct = models.FloatField(
+        null=True, blank=True,
+        help_text="Tile height as a percent (0–100] of each image's height.",
+    )
     overlap = models.FloatField(null=True, blank=True)
     chain = models.JSONField(
         default=list, blank=True,
@@ -91,8 +98,8 @@ class PipelineEvalRun(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
-        verbose_name = "Pipeline Eval"
-        verbose_name_plural = "Pipeline Eval"
+        verbose_name = "All pipeline eval"
+        verbose_name_plural = "All pipeline evals"
 
     def __str__(self) -> str:
         return (
@@ -118,3 +125,57 @@ class BaseEval(EvalRun):
         proxy = True
         verbose_name = "Base Eval"
         verbose_name_plural = "Base Eval"
+
+
+def _pipeline_manager(pipeline_value: str) -> models.Manager:
+    """Manager that scopes a proxy to a single ``pipeline`` value.
+
+    Each per-pipeline proxy below shares ``PipelineEvalRun``'s table; the manager
+    filters it down so the proxy's admin list shows only that pipeline's runs.
+    """
+
+    class _Manager(models.Manager):
+        def get_queryset(self):
+            return super().get_queryset().filter(pipeline=pipeline_value)
+
+    return _Manager()
+
+
+# Per-pipeline proxies — one admin list per pipeline type. Each shares
+# ``PipelineEvalRun``'s table but its manager scopes the queryset to a single
+# pipeline, so a run created by the "Evaluate…" action appears under the list
+# matching the pipeline chosen there.
+class BatchDetectEval(PipelineEvalRun):
+    objects = _pipeline_manager(PipelineEvalRun.BATCH_DETECT)
+
+    class Meta:
+        proxy = True
+        verbose_name = "Batch detect eval"
+        verbose_name_plural = "Batch detect"
+
+
+class PeopleDetectFirstEval(PipelineEvalRun):
+    objects = _pipeline_manager(PipelineEvalRun.PEOPLE_DETECT_FIRST)
+
+    class Meta:
+        proxy = True
+        verbose_name = "People detect first eval"
+        verbose_name_plural = "People detect first"
+
+
+class BatchPeopleEval(PipelineEvalRun):
+    objects = _pipeline_manager(PipelineEvalRun.BATCH_PEOPLE)
+
+    class Meta:
+        proxy = True
+        verbose_name = "Batch people eval"
+        verbose_name_plural = "Batch people"
+
+
+class ChainEval(PipelineEvalRun):
+    objects = _pipeline_manager(PipelineEvalRun.CHAIN)
+
+    class Meta:
+        proxy = True
+        verbose_name = "Chain eval"
+        verbose_name_plural = "Chain"

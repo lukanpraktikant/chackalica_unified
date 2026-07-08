@@ -303,8 +303,10 @@ def build_pipeline_request(pe, output_dir: Path | str, ts: TrainingSettings | No
             f"pipeline '{pe.pipeline}' requires a detector checkpoint.")
 
     tiling = {}
-    if pe.tile_size:
-        tiling["tile_size"] = pe.tile_size
+    if pe.tile_width_pct:
+        tiling["tile_width_pct"] = pe.tile_width_pct
+    if pe.tile_height_pct:
+        tiling["tile_height_pct"] = pe.tile_height_pct
     if pe.overlap is not None:
         tiling["overlap"] = pe.overlap
     if tiling:
@@ -333,7 +335,8 @@ def build_preview_request(
     image_path: str,
     *,
     detector_checkpoint: str = "",
-    tile_size: int | None = None,
+    tile_width_pct: float | None = None,
+    tile_height_pct: float | None = None,
     overlap: float | None = None,
     chain: list[str] | None = None,
     score_threshold: float = 0.05,
@@ -358,8 +361,10 @@ def build_preview_request(
     }
     if detector_checkpoint:
         payload["detector_checkpoint"] = detector_checkpoint
-    if tile_size:
-        payload["tile_size"] = tile_size
+    if tile_width_pct:
+        payload["tile_width_pct"] = tile_width_pct
+    if tile_height_pct:
+        payload["tile_height_pct"] = tile_height_pct
     if overlap is not None:
         payload["overlap"] = overlap
     if chain:

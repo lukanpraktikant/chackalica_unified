@@ -18,7 +18,8 @@ score_threshold: 0.001
 merge_nms_iou: 0.5
 
 tiling:
-  tile_size: 640
+  tile_width_pct: 50
+  tile_height_pct: 50
   overlap: 0.2
   nms_iou: 0.5
 

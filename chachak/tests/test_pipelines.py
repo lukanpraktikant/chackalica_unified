@@ -62,7 +62,7 @@ def make_config(pipeline, **overrides):
         device="cpu",
         infer_batch_size=2,
         score_threshold=0.05,
-        tiling=TilingConfig(tile_size=64, overlap=0.2, nms_iou=0.5),
+        tiling=TilingConfig(tile_width_pct=40, tile_height_pct=40, overlap=0.2, nms_iou=0.5),
         detector=DetectorConfig(score_threshold=0.0, expand_ratio=0.1, nms_iou=0.5),
     )
     kwargs.update(overrides)
@@ -107,7 +107,7 @@ class ProcessBatchTest(unittest.TestCase):
         pipe = BatchDetectPipeline(StubModel(), DEVICE, make_config("batch_detect"))
         out = pipe.process_batch(images, targets)
         assert_valid_preds(self, out, len(images))
-        # tile_size 64 over 120x160 / 96x144 yields several tiles -> several boxes.
+        # 40% tiles over 120x160 / 96x144 yield several tiles -> several boxes.
         self.assertTrue(all(p.shape[0] >= 1 for p in out))
 
     def test_batch_detect_empty_model_yields_empty(self):

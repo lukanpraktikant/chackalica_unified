@@ -16,6 +16,7 @@ score_threshold: 0.001              # eval threshold (low, for PR curves)
 merge_nms_iou: 0.5
 
 tiling:
-  tile_size: 640                    # int (square) or [width, height]
+  tile_width_pct: 50                # tile width as a percent (0, 100] of each image
+  tile_height_pct: 50               # tile height as a percent (0, 100] of each image
   overlap: 0.2                      # fraction, [0, 1)
   nms_iou: 0.5                      # de-dup across tile seams
