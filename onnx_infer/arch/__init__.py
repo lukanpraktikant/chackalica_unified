@@ -10,10 +10,13 @@ from __future__ import annotations
 from ..errors import UnknownArchError
 from .base import ArchHandler
 from .retinanet import RetinaNetHandler
+from .rfdetr import RFDetrHandler
+from .rtdetr import RTDetrHandler
+from .yolox import YOLOXHandler
 
 ARCH_REGISTRY: dict[str, ArchHandler] = {
     handler.name: handler
-    for handler in (RetinaNetHandler(),)
+    for handler in (RetinaNetHandler(), YOLOXHandler(), RTDetrHandler(), RFDetrHandler())
 }
 
 

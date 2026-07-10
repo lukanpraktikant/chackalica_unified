@@ -90,6 +90,13 @@ feeds raw pixels; RetinaNet's normalize is folded into the export wrapper).
 `schema_version` is guarded on load so an old service fails loudly on a newer
 artifact instead of silently mis-decoding.
 
+`clip_boxes` (bool, default false) clamps mapped-back boxes to the original
+image bounds. Set per-arch to match whether that arch's torch path clips: YOLOX
+`true` (its `clip_xyxy`), RetinaNet `false` (already clipped internally — a
+no-op either way), RT-DETR / RF-DETR `false` (they don't clip, so the service
+must not either, or it diverges). It's a meta flag, not arch branching in the
+core.
+
 ### Coordinate mapping (decided: bake decode in graph, back-map in service)
 
 - The graph resolves the **decode frame** → boxes in input-tensor pixel space.
@@ -129,12 +136,12 @@ onnx_infer/
   - `default_input_spec()` / `default_normalize()` — the arch's preprocess
     defaults (used when building/validating `meta.json`; `meta` still wins).
   - `adapt_outputs(raw_ort_outputs) -> (boxes, scores, labels)` — maps the raw
-    ORT session output list to the canonical 3-tensor of **Contract A**. For
-    wrapper-exported archs (retinanet/yolox/rtdetr/yolo) this is an
-    identity/reorder; **RF-DETR** does the real work here (its ONNX output
-    signature is dictated by the `rfdetr` package's native exporter, not our
-    wrapper), so its quirk lives in `arch/rfdetr.py` instead of leaking an
-    `if arch == "rfdetr"` into the generic core.
+    ORT session output list to the canonical 3-tensor of **Contract A**. Every
+    arch (retinanet/yolox/rtdetr/rfdetr) exports through our own wrapper that
+    emits the three tensors in order, so all four use `PassthroughHandler`
+    (identity). RF-DETR does **not** use the `rfdetr` package's native exporter
+    (see the RF-DETR build-order note): its head math is baked into our wrapper
+    like the others, so no arch-specific `adapt_outputs` is needed after all.
 - `preprocess.py`/`postprocess.py` keep the **uniform** math (resize/pad +
   the single coordinate inverse); the handler only feeds params and the output
   shim. `adapter.py` looks up the handler via `get_handler(meta["arch"])`.
@@ -190,7 +197,7 @@ friendy_chachkalica/onnx_export/
     retinanet.py  # ExportWrapper(nn.Module) + build_meta() for this arch
     yolox.py
     rtdetr.py
-    rfdetr.py     # uses rfdetr package native .export(); emits matching meta
+    rfdetr.py     # our wrapper: LWDETR.export() for traceability + head baked in-graph
     yolo.py
 ```
 
@@ -210,7 +217,7 @@ for that arch — kept adjacent by name on purpose.
 | retinanet | none | null (folded into wrapper) | 32 | wrapper prepends normalize; torchvision postproc yields boxes | low |
 | yolox | none | null (raw px) | 32 | decode grid + `torchvision.ops.batched_nms` in graph | med |
 | rtdetr | none | mean/std | 32 | sigmoid + top-k (no NMS) in graph | med (opset≥16, eval) |
-| rfdetr | square | mean/std | 0 | rfdetr native `.export()`, adapt outputs to 3-tensor + bg-class drop | high |
+| rfdetr | square | mean/std | 0 | our wrapper: `LWDETR.export()` for traceability, then sigmoid+top-k+cxcywh→xyxy+clamp+bg-drop in-graph | med |
 | yolo (new) | longest_side (letterbox) | null | 32 | ultralytics native export; letterbox-undo folded so output is input-pixels | low |
 
 Notes:
@@ -242,11 +249,35 @@ Notes:
 
 ## Build order (each slice = `onnx_export/arch/<arch>.py` + `onnx_infer/arch/<arch>.py` + parity test)
 
-1. **RetinaNet** — proves the seam + `meta.json` contract on the easy case.
-2. **YOLO (ultralytics)** — native export; exercises letterbox + `longest_side`.
-3. **YOLOX** — NMS-in-graph.
-4. **RT-DETR** — HF export, opset/eval sensitivity.
-5. **RF-DETR** — native exporter, deform-attn, output adaptation.
+1. **RetinaNet** — ✅ done (parity passing). Proved the seam + `meta.json`.
+2. **YOLOX** — ✅ done (parity passing at 640² + 480×640 + 512²). NMS-in-graph;
+   dynamic H/W export verified working in torch 2.12 (decode grids regenerate at
+   runtime). Added the `clip_boxes` meta flag for it.
+3. **RT-DETR** — ✅ done (parity passing at 512² + 480×640 + 704×512 resized).
+   HF export with a float32 sine-embedding twin (onnxruntime has no double
+   Sin/Cos kernel); sigmoid + top-k query selection baked into the graph.
+   **Fixture gotcha:** a random-init RT-DETR gives every encoder proposal the
+   same constant score (ln(1/C)), so the encoder's `topk(num_queries)` selects a
+   different query set under torch vs onnxruntime (tie-break divergence) — not an
+   export bug (graph is bit-identical up to the topk). Fixed by spreading
+   `enc_score_head` + final `class_embed` in the parity fixture (small std so the
+   256-dim dot product doesn't saturate sigmoid), mirroring retinanet/yolox.
+4. **RF-DETR** — ✅ done (parity passing at 480×640 + 512² + 720×480; verified
+   end-to-end on real trained nano/base/large checkpoints, worst L1 ~1e-6–2e-4).
+   **Design change from the original plan:** we do *not* use the `rfdetr`
+   package's native `.export()` (which emits raw `dets`/`labels` and would need a
+   heavy `adapt_outputs`). Instead we wrap `adapter.model` like the other archs:
+   call `LWDETR.export()` (on a `deepcopy`) purely to switch the module to
+   `forward_export` and put deformable-attention into an ONNX-traceable mode, then
+   bake the whole head — sigmoid + top-k(`num_select`) over `Q*(C+1)` +
+   `cxcywh→xyxy` + clamp `[0,1]` + **background-class drop** (`label ==
+   num_classes`) — into our wrapper. Output is normalized xyxy
+   (`box_coords: "input_normalized"`), service handler is a plain
+   `PassthroughHandler`. RF-DETR's square (aspect-changing) resize makes the
+   normalized box identical in the input and the original image, so the torch
+   path's scale-to-original then re-normalize cancels — no coordinate bookkeeping.
+   Random-init parity fixture needs no head surgery (unlike RT-DETR).
+5. **YOLO (ultralytics)** — deferred (new arch, not currently trained).
 
 ## Verification (end-to-end)
 

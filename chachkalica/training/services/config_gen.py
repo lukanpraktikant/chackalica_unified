@@ -179,6 +179,7 @@ def build_experiment_dict(experiment: Experiment, output_dir: Path | str) -> dic
         "evaluation": {
             "batch_size": experiment.eval_batch_size,
             "num_workers": experiment.eval_num_workers,
+            "map_score_threshold": 0.001,
             "score_threshold": experiment.eval_score_threshold,
             "iou_thresholds": experiment.iou_thresholds,
         },

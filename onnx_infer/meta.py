@@ -26,6 +26,16 @@ SCHEMA_VERSION = 1
 RESIZE_MODES = {"none", "square", "longest_side"}
 INPUT_SCALES = {"unit", "byte"}  # 0..1 floats vs 0..255 floats
 
+# box_coords — the frame the graph emits boxes in:
+#   "input_pixels"     — xyxy in the graph's input-tensor pixel space; the service
+#                        inverts its recorded resize+pad to map back (RetinaNet,
+#                        YOLOX).
+#   "input_normalized" — xyxy already normalized to [0,1] over the model input
+#                        (DETR-family: the box is invariant to the absolute input
+#                        size). Maps straight to Friendy xywhn with no transform
+#                        inverse (RT-DETR, RF-DETR).
+BOX_COORDS = {"input_pixels", "input_normalized"}
+
 
 @dataclass(frozen=True)
 class InputSpec:
@@ -63,6 +73,12 @@ class ModelMeta:
     normalize: Optional[Normalize] = None
     layout: str = "rgb"
     box_coords: str = "input_pixels"
+    # Clip boxes to the original image bounds after the coordinate inverse.
+    # Matches archs whose torch path clips (YOLOX's clip_xyxy); a no-op for archs
+    # that already emit in-bounds boxes (RetinaNet clips internally); must stay
+    # False for archs whose torch path does not clip (RT-DETR/RF-DETR) so the
+    # service doesn't diverge from them.
+    clip_boxes: bool = False
     schema_version: int = SCHEMA_VERSION
 
     # ------------------------------------------------------------------ load
@@ -97,11 +113,12 @@ class ModelMeta:
             normalize=normalize,
             layout=str(raw.get("layout", "rgb")),
             box_coords=str(raw.get("box_coords", "input_pixels")),
+            clip_boxes=bool(raw.get("clip_boxes", False)),
             schema_version=SCHEMA_VERSION,
         )
-        if meta.box_coords != "input_pixels":
+        if meta.box_coords not in BOX_COORDS:
             raise MetaSchemaError(
-                f"box_coords {meta.box_coords!r} unsupported; graph must emit input-pixel xyxy"
+                f"box_coords {meta.box_coords!r} unsupported; expected one of {BOX_COORDS}"
             )
         return meta
 

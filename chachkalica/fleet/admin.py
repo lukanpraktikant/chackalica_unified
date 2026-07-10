@@ -6,18 +6,25 @@ returns immediately. The row's status column then reflects
 ``queued -> running -> ok/error`` as the worker picks it up (refresh to see it).
 """
 
+from pathlib import Path
+
 import django_rq
 from django import forms
 from django.contrib import admin, messages
 from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
+from django.http import FileResponse, Http404, JsonResponse
+from django.shortcuts import redirect
 from django.template.response import TemplateResponse
+from django.urls import path, reverse
 from django.utils import timezone
 from django.utils.html import format_html
+from django.utils.http import urlencode
 
 from fleet import jobs
 from fleet.models import Annotator, Dataset, FleetSettings, Project
 from fleet.services import analytics as analytics_svc
 from fleet.services import datasets as datasets_svc
+from fleet.services import lsapi
 from fleet.services import merge as merge_svc
 from fleet.services.paths import source_root
 
@@ -153,6 +160,74 @@ class DatasetAdminForm(forms.ModelForm):
             return []
 
 
+def _preview_bounded_index(request, count):
+    """Parse a 0-based ``?index=`` and bound it to ``[0, count)`` or 404."""
+    if count <= 0:
+        raise Http404("dataset has no images")
+    try:
+        index = int(request.GET.get("index", 0))
+    except (TypeError, ValueError):
+        raise Http404("bad index")
+    if not 0 <= index < count:
+        raise Http404("index out of range")
+    return index
+
+
+def _preview_label_dir(request, dataset):
+    """Resolve the ground-truth label dir from the preview query, or None.
+
+    Returns None when the resolved dir is missing so the viewer can say
+    "no labels" instead of erroring. ``config_gen`` is imported lazily to avoid
+    a fleet -> training import cycle at module load.
+    """
+    from training.services import config_gen
+
+    label_source = request.GET.get("label_source") or ""
+    if not label_source:
+        return None
+    annotator = Annotator.objects.filter(pk=request.GET.get("annotator")).first()
+    try:
+        label_dir = config_gen.resolve_label_dir(
+            dataset, label_source, annotator,
+            (request.GET.get("explicit_labels_path") or "").strip())
+    except (ValueError, FileNotFoundError):
+        return None
+    return label_dir if Path(label_dir).is_dir() else None
+
+
+def _read_label_shapes(label_dir, image_path, class_names):
+    """Parse an image's label ``.txt`` into normalized draw shapes.
+
+    Uses the same pairing the rest of the app uses (``<stem>.txt`` then
+    ``<image>.txt``) and :func:`txt_format.parse_label_text`, which auto-detects
+    the app's ``W H`` header vs header-less YOLO and splits polygons from boxes.
+    Each shape is ``{class_id, class_name, kind, bbox, polygon}`` with normalized
+    center-xywh ``bbox`` and, for polygons, a flat normalized ``polygon`` list.
+    """
+    from fleet.reconcile import txt_format
+
+    label_dir = Path(label_dir)
+    candidates = [label_dir / f"{image_path.stem}.txt", label_dir / f"{image_path.name}.txt"]
+    label_file = next((c for c in candidates if c.exists()), None)
+    if label_file is None:
+        return []
+    _w, _h, objects = txt_format.parse_label_text(label_file.read_text())
+    shapes = []
+    for obj in objects:
+        class_id = obj["class_id"]
+        name = class_names[class_id] if 0 <= class_id < len(class_names) else str(class_id)
+        cx, cy, w, h = obj["bbox"]
+        polygon = obj.get("polygon")
+        shapes.append({
+            "class_id": class_id,
+            "class_name": name,
+            "kind": "polygon" if polygon else "box",
+            "bbox": {"cx": cx, "cy": cy, "w": w, "h": h},
+            "polygon": polygon or [],
+        })
+    return shapes
+
+
 @admin.register(Dataset)
 class DatasetAdmin(admin.ModelAdmin):
     form = DatasetAdminForm
@@ -165,6 +240,7 @@ class DatasetAdmin(admin.ModelAdmin):
         "setup_sync_one_annotator",
         "merge_selected",
         "analyze_selected",
+        "preview_labels",
     ]
 
     def save_model(self, request, obj, form, change):
@@ -321,6 +397,112 @@ class DatasetAdmin(admin.ModelAdmin):
             "reports": reports,
         }
         return TemplateResponse(request, "admin/fleet/dataset_analytics.html", context)
+
+    # -------------------------------------------------------------- label preview
+    @admin.action(description="Preview dataset labels…")
+    def preview_labels(self, request, queryset):
+        """Open the interactive label viewer for one dataset.
+
+        Draws the on-disk annotations (source labels, an annotator's output, or an
+        explicit path) on each image and lets the operator scroll through — no model,
+        no inference. Like the model preview this persists nothing: on submit it just
+        redirects to the viewer with the chosen label source as query params.
+        """
+        from training.models import ExperimentDataset
+
+        if queryset.count() != 1:
+            self.message_user(request, "Select exactly one dataset to preview.",
+                              level=messages.WARNING)
+            return None
+        dataset = queryset.first()
+
+        if request.POST.get("apply"):
+            params = {
+                "dataset": dataset.pk,
+                "label_source": request.POST.get("label_source") or ExperimentDataset.SOURCE,
+                "annotator": request.POST.get("annotator") or "",
+                "explicit_labels_path": (request.POST.get("explicit_labels_path") or "").strip(),
+            }
+            query = urlencode({k: v for k, v in params.items() if v not in ("", None)})
+            return redirect(reverse("admin:fleet_dataset_preview") + "?" + query)
+
+        context = {
+            **self.admin_site.each_context(request),
+            "title": f"Preview labels for {dataset.name}",
+            "dataset": dataset,
+            "annotators": Annotator.objects.filter(status=Annotator.ACTIVE).order_by("username"),
+            "label_source_choices": ExperimentDataset.LABEL_SOURCE_CHOICES,
+            "default_label_source": ExperimentDataset.SOURCE,
+            "action": "preview_labels",
+            "selected": [str(dataset.pk)],
+            "action_checkbox_name": ACTION_CHECKBOX_NAME,
+        }
+        return TemplateResponse(request, "admin/fleet/dataset_preview.html", context)
+
+    def get_urls(self):
+        custom = [
+            path("dataset-preview/", self.admin_site.admin_view(self.preview_view),
+                 name="fleet_dataset_preview"),
+            path("dataset-preview/image/", self.admin_site.admin_view(self.preview_image),
+                 name="fleet_dataset_preview_image"),
+            path("dataset-preview/data/", self.admin_site.admin_view(self.preview_data),
+                 name="fleet_dataset_preview_data"),
+        ]
+        return custom + super().get_urls()
+
+    def preview_view(self, request):
+        """Render the viewer shell; the browser pulls images + labels per index."""
+        dataset = Dataset.objects.filter(pk=request.GET.get("dataset")).first()
+        if dataset is None:
+            raise Http404("preview requires ?dataset=")
+
+        images = lsapi.list_dataset_images(source_root() / dataset.name)
+        has_labels = _preview_label_dir(request, dataset) is not None
+
+        context = {
+            **self.admin_site.each_context(request),
+            "title": f"Labels — {dataset.name}",
+            "dataset": dataset,
+            "image_count": len(images),
+            "has_labels": has_labels,
+            "query": request.GET.urlencode(),
+        }
+        return TemplateResponse(request, "admin/fleet/dataset_preview_viewer.html", context)
+
+    def preview_image(self, request):
+        """Stream the raw bytes of the dataset image at ``?index=``."""
+        dataset = Dataset.objects.filter(pk=request.GET.get("dataset")).first()
+        if dataset is None:
+            raise Http404("unknown dataset")
+        images = lsapi.list_dataset_images(source_root() / dataset.name)
+        index = _preview_bounded_index(request, len(images))
+        return FileResponse(open(images[index], "rb"))
+
+    def preview_data(self, request):
+        """Return the label shapes for one image (no inference)."""
+        from training.services import config_gen
+
+        dataset = Dataset.objects.filter(pk=request.GET.get("dataset")).first()
+        if dataset is None:
+            return JsonResponse({"error": "unknown dataset"}, status=400)
+
+        images = lsapi.list_dataset_images(source_root() / dataset.name)
+        if not images:
+            return JsonResponse({"error": "dataset has no images"}, status=400)
+        index = _preview_bounded_index(request, len(images))
+        image_path = images[index]
+
+        label_dir = _preview_label_dir(request, dataset)
+        shapes = (
+            _read_label_shapes(label_dir, image_path, config_gen.dataset_classes(dataset))
+            if label_dir is not None else []
+        )
+        return JsonResponse({
+            "shapes": shapes,
+            "image": image_path.name,
+            "index": index,
+            "count": len(images),
+        })
 
 
 @admin.register(Project)

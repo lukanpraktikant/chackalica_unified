@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Sequence
 
 import torch
@@ -170,6 +171,121 @@ def evaluate_detection(
             for class_id in class_ids
         },
     }
+
+
+HARD_IMAGE_METRIC = "detection_error_count"
+HARD_IMAGE_METRIC_DESCRIPTION = (
+    "difficulty = missed_GT + false_positives + wrong_class_matches "
+    "+ Σ(1 - IoU over correctly-classified matches); higher = worse"
+)
+
+
+def select_hard_images(
+    predictions: Sequence[torch.Tensor],
+    targets: Sequence[Dict[str, Any]],
+    image_infos: Sequence[Dict[str, Any]],
+    *,
+    top_k: int = 50,
+    iou_threshold: float = 0.5,
+    score_threshold: float = 0.25,
+    prediction_classes: Optional[Dict[int, str]] = None,
+    target_classes: Optional[Dict[int, str]] = None,
+    eval_classes: Optional[Dict[int, str]] = None,
+) -> list[Dict[str, Any]]:
+    """Rank images by a per-image detection-error score and return the worst ``top_k``.
+
+    The score is :data:`HARD_IMAGE_METRIC_DESCRIPTION`. Predictions and ground truth are
+    prepared and remapped into the eval class space exactly like :func:`evaluate_detection`,
+    so the boxes returned (normalized center-xywh, with resolved class names) match the score.
+    Each entry is self-contained for a viewer: image path/name, difficulty + component
+    breakdown, and prediction/ground-truth boxes.
+    """
+    prepared_targets = [_prepare_target(target) for target in targets]
+    prepared_predictions = [
+        _prepare_prediction(prediction, target, float(score_threshold))
+        for prediction, target in zip(predictions, prepared_targets)
+    ]
+
+    # Mirror evaluate_detection's eval-class remap so class ids/names match the metrics.
+    effective_eval_classes = eval_classes
+    if eval_classes is not None and prediction_classes is not None:
+        prediction_names = {str(name) for name in prediction_classes.values()}
+        effective_eval_classes = {
+            class_id: name
+            for class_id, name in eval_classes.items()
+            if str(name) in prediction_names
+        }
+    if effective_eval_classes is not None:
+        prepared_predictions, prepared_targets = _remap_to_eval_classes(
+            prepared_predictions,
+            prepared_targets,
+            prediction_classes=prediction_classes,
+            target_classes=target_classes,
+            eval_classes=effective_eval_classes,
+        )
+
+    name_lookup = (
+        _normalize_class_map(effective_eval_classes)
+        if effective_eval_classes is not None
+        else None
+    )
+
+    scored = []
+    for index, (prediction, target) in enumerate(zip(prepared_predictions, prepared_targets)):
+        match = match_image(prediction, target, float(iou_threshold))
+        wrong_class = sum(1 for pair in match['matches'] if not pair['class_correct'])
+        loc_error = sum(1.0 - pair['iou'] for pair in match['matches'] if pair['class_correct'])
+        missed = len(match['misses'])
+        false_positives = len(match['false_positives'])
+        difficulty = missed + false_positives + wrong_class + loc_error
+
+        info = image_infos[index] if index < len(image_infos) and isinstance(image_infos[index], dict) else {}
+        image_path = info.get('image_path')
+        height, width = [int(value) for value in target['orig_size']]
+        scored.append({
+            'image_path': str(image_path) if image_path else None,
+            'image_name': Path(str(image_path)).name if image_path else f'image_{index}',
+            'difficulty': round(float(difficulty), 4),
+            'missed': missed,
+            'false_positives': false_positives,
+            'wrong_class': wrong_class,
+            'loc_error': round(float(loc_error), 4),
+            'num_predictions': int(prediction['labels'].numel()),
+            'num_ground_truth': int(target['labels'].numel()),
+            'predictions': _boxes_for_display(prediction, width, height, name_lookup, with_score=True),
+            'ground_truth': _boxes_for_display(target, width, height, name_lookup, with_score=False),
+        })
+
+    scored.sort(key=lambda entry: entry['difficulty'], reverse=True)
+    return scored[:int(top_k)]
+
+
+def _boxes_for_display(detection, image_width, image_height, name_lookup, with_score):
+    """Convert an xyxy-pixel detection dict to normalized center-xywh box dicts for a viewer."""
+    boxes = detection['boxes']
+    labels = detection['labels']
+    scores = detection.get('scores')
+    if boxes.numel() == 0:
+        return []
+    width = max(int(image_width), 1)
+    height = max(int(image_height), 1)
+    result = []
+    for row in range(boxes.shape[0]):
+        x1, y1, x2, y2 = (float(value) for value in boxes[row])
+        class_id = int(labels[row])
+        name = (name_lookup.get(class_id) if name_lookup else None) or str(class_id)
+        box = {
+            'cx': ((x1 + x2) / 2) / width,
+            'cy': ((y1 + y2) / 2) / height,
+            'w': (x2 - x1) / width,
+            'h': (y2 - y1) / height,
+            'class_id': class_id,
+            'class_name': name,
+        }
+        if with_score and scores is not None:
+            box['confidence'] = round(float(scores[row]), 4)
+        result.append(box)
+    return result
 
 
 def _prepare_target(target: Dict[str, Any]) -> Dict[str, torch.Tensor]:
@@ -541,6 +657,58 @@ def _micro_stats(
     }
 
 
+def match_image(prediction, target, iou_threshold: float) -> Dict[str, Any]:
+    """Greedily match one image's predictions to its ground truth by IoU (class-agnostic).
+
+    Mirrors the one-gt-per-prediction accounting used by :func:`_confusion_matrix` and the AP
+    matching: predictions are claimed in descending score order, each taking its highest-IoU
+    still-unclaimed ground-truth box, and a match requires IoU >= ``iou_threshold``. Matching
+    ignores class so a located-but-mislabelled box counts as a match with ``class_correct``
+    False rather than as both a miss and a false positive.
+
+    Returns ``{'matches': [{'pred_index','gt_index','iou','class_correct'}...],
+    'false_positives': [pred_index...], 'misses': [gt_index...]}`` with indices into the
+    passed ``prediction``/``target`` arrays.
+    """
+    pred_boxes = prediction['boxes']
+    pred_scores = prediction['scores']
+    pred_labels = prediction['labels']
+    gt_boxes = target['boxes']
+    gt_labels = target['labels']
+    num_pred = int(pred_labels.numel())
+    num_gt = int(gt_labels.numel())
+
+    gt_claimed = [False] * num_gt
+    pred_matched = [False] * num_pred
+    matches = []
+
+    if num_pred and num_gt:
+        ious = box_iou(pred_boxes, gt_boxes)
+        for pred_index in torch.argsort(pred_scores, descending=True, stable=True).tolist():
+            available = [gt for gt in range(num_gt) if not gt_claimed[gt]]
+            if not available:
+                break
+            overlaps = ious[pred_index]
+            best_gt = max(available, key=lambda gt: float(overlaps[gt]))
+            iou = float(overlaps[best_gt])
+            if iou < iou_threshold:
+                continue
+            gt_claimed[best_gt] = True
+            pred_matched[pred_index] = True
+            matches.append({
+                'pred_index': pred_index,
+                'gt_index': best_gt,
+                'iou': iou,
+                'class_correct': int(pred_labels[pred_index]) == int(gt_labels[best_gt]),
+            })
+
+    return {
+        'matches': matches,
+        'false_positives': [index for index in range(num_pred) if not pred_matched[index]],
+        'misses': [index for index in range(num_gt) if not gt_claimed[index]],
+    }
+
+
 def _confusion_matrix(
     predictions,
     targets,
@@ -573,44 +741,26 @@ def _confusion_matrix(
 
     for prediction, target in zip(predictions, targets):
         keep = prediction['scores'] >= float(conf_threshold)
-        pred_labels = prediction['labels'][keep]
-        pred_boxes = prediction['boxes'][keep]
-        pred_scores = prediction['scores'][keep]
+        kept = {
+            'boxes': prediction['boxes'][keep],
+            'scores': prediction['scores'][keep],
+            'labels': prediction['labels'][keep],
+        }
         gt_labels = target['labels']
-        gt_boxes = target['boxes']
-        num_pred = int(pred_labels.numel())
-        num_gt = int(gt_labels.numel())
+        result = match_image(kept, target, iou_threshold)
 
-        gt_claimed = [False] * num_gt
-        pred_matched = [False] * num_pred
+        for pair in result['matches']:
+            truth = index_of.get(int(gt_labels[pair['gt_index']]))
+            predicted = index_of.get(int(kept['labels'][pair['pred_index']]))
+            if truth is not None and predicted is not None:
+                matrix[truth][predicted] += 1
 
-        if num_pred and num_gt:
-            ious = box_iou(pred_boxes, gt_boxes)
-            for pred_index in torch.argsort(pred_scores, descending=True, stable=True).tolist():
-                available = [gt for gt in range(num_gt) if not gt_claimed[gt]]
-                if not available:
-                    break
-                overlaps = ious[pred_index]
-                best_gt = max(available, key=lambda gt: float(overlaps[gt]))
-                if float(overlaps[best_gt]) < iou_threshold:
-                    continue
-                gt_claimed[best_gt] = True
-                pred_matched[pred_index] = True
-                truth = index_of.get(int(gt_labels[best_gt]))
-                predicted = index_of.get(int(pred_labels[pred_index]))
-                if truth is not None and predicted is not None:
-                    matrix[truth][predicted] += 1
-
-        for pred_index in range(num_pred):
-            if pred_matched[pred_index]:
-                continue
-            predicted = index_of.get(int(pred_labels[pred_index]))
+        for pred_index in result['false_positives']:
+            predicted = index_of.get(int(kept['labels'][pred_index]))
             if predicted is not None:
                 matrix[background][predicted] += 1
 
-        for gt_index in range(num_gt):
-            if gt_claimed[gt_index]:
-                continue
+        for gt_index in result['misses']:
             truth = index_of.get(int(gt_labels[gt_index]))
             if truth is not None:
                 matrix[truth][background] += 1

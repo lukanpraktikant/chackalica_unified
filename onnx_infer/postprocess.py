@@ -31,8 +31,24 @@ def to_friendy(
     labels: np.ndarray,
     transform: Transform,
     score_threshold: float,
+    clip_boxes: bool = False,
+    box_coords: str = "input_pixels",
 ) -> np.ndarray:
-    """boxes ``[N,4]`` xyxy input-pixels, scores ``[N]``, labels ``[N]`` -> ``[M,6]``."""
+    """boxes ``[N,4]`` xyxy, scores ``[N]``, labels ``[N]`` -> Friendy ``[M,6]``.
+
+    ``box_coords``:
+      * ``"input_pixels"`` — boxes are xyxy in the graph's input-tensor pixel
+        frame; invert the recorded resize+pad to original pixels, then normalize.
+      * ``"input_normalized"`` — boxes are already xyxy in ``[0,1]`` over the model
+        input (DETR-family). The transform is irrelevant: the value maps straight
+        to Friendy xywhn (matches the torch path, where scaling to the original
+        size and re-normalizing cancels out).
+
+    ``clip_boxes`` clamps boxes to ``[0, orig_w] x [0, orig_h]`` after the inverse,
+    to match archs whose torch path clips (YOLOX). Left False for archs that don't
+    (RT-DETR/RF-DETR); a no-op for archs already in-bounds (RetinaNet). Only
+    meaningful for ``input_pixels``.
+    """
     boxes = np.asarray(boxes, dtype=np.float32).reshape(-1, 4)
     scores = np.asarray(scores, dtype=np.float32).reshape(-1)
     labels = np.asarray(labels).reshape(-1)
@@ -45,10 +61,17 @@ def to_friendy(
     if boxes.shape[0] == 0:
         return np.zeros((0, len(FRIENDY_COLUMNS)), dtype=np.float32)
 
-    # Invert preprocessing: input-pixel -> original-image pixel.
     boxes = boxes.copy()
-    boxes[:, [0, 2]] = (boxes[:, [0, 2]] - transform.pad_x) / transform.scale_x
-    boxes[:, [1, 3]] = (boxes[:, [1, 3]] - transform.pad_y) / transform.scale_y
+    if box_coords == "input_pixels":
+        # Invert preprocessing: input-pixel -> original-image pixel.
+        boxes[:, [0, 2]] = (boxes[:, [0, 2]] - transform.pad_x) / transform.scale_x
+        boxes[:, [1, 3]] = (boxes[:, [1, 3]] - transform.pad_y) / transform.scale_y
+        if clip_boxes:
+            boxes[:, [0, 2]] = np.clip(boxes[:, [0, 2]], 0.0, transform.orig_w)
+            boxes[:, [1, 3]] = np.clip(boxes[:, [1, 3]], 0.0, transform.orig_h)
+        norm_w, norm_h = transform.orig_w, transform.orig_h
+    else:  # input_normalized — already [0,1] over the model input.
+        norm_w = norm_h = 1.0
 
     x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
     width = x2 - x1
@@ -57,12 +80,7 @@ def to_friendy(
     y_center = y1 + height / 2
 
     xywhn = np.stack(
-        [
-            x_center / transform.orig_w,
-            y_center / transform.orig_h,
-            width / transform.orig_w,
-            height / transform.orig_h,
-        ],
+        [x_center / norm_w, y_center / norm_h, width / norm_w, height / norm_h],
         axis=1,
     )
     return np.concatenate(

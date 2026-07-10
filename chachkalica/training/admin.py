@@ -7,6 +7,7 @@ trainer service is a later phase — for now the action ends at a generated,
 ready-to-run config.
 """
 
+import json
 from pathlib import Path
 
 import django_rq
@@ -201,7 +202,10 @@ class TrainingRunAdmin(admin.ModelAdmin):
     list_display = ["__str__", "experiment", "status_badge", "config_yaml_path", "created_at"]
     list_filter = ["status", "experiment"]
     inlines = [RunResultInline]
-    actions = ["launch_selected", "ingest_selected", "reconcile_selected", "kill_run_gracefully"]
+    actions = [
+        "launch_selected", "view_hard_val_images", "ingest_selected",
+        "reconcile_selected", "kill_run_gracefully",
+    ]
     readonly_fields = [
         "experiment", "status", "epoch_progress", "config_yaml_path", "output_dir",
         "last_error", "started_at", "finished_at", "results", "created_at",
@@ -239,6 +243,145 @@ class TrainingRunAdmin(admin.ModelAdmin):
                 for h in histories
             ),
         )
+
+    def get_urls(self):
+        custom = [
+            path("hard-images/", self.admin_site.admin_view(self.hard_images_view),
+                 name="training_trainingrun_hard_images"),
+            path("hard-images/image/", self.admin_site.admin_view(self.hard_images_image),
+                 name="training_trainingrun_hard_images_image"),
+            path("hard-images/data/", self.admin_site.admin_view(self.hard_images_data),
+                 name="training_trainingrun_hard_images_data"),
+        ]
+        return custom + super().get_urls()
+
+    @admin.action(description="View live hardest val images...")
+    def view_hard_val_images(self, request, queryset):
+        """Open live hardest-val-image artifacts written by validation epochs."""
+        if queryset.count() != 1:
+            self.message_user(request, "Select exactly one training run.", level=messages.WARNING)
+            return None
+        run = queryset.first()
+        artifacts = self._hard_image_artifacts(run)
+        if not artifacts:
+            self.message_user(
+                request,
+                f"Run #{run.pk}: no hardest-val-images artifact yet. Reload after the "
+                "first validation mAP pass has completed.",
+                level=messages.WARNING,
+            )
+            return None
+        return redirect(reverse("admin:training_trainingrun_hard_images") + "?run=" + str(run.pk))
+
+    def _hard_image_artifacts(self, run):
+        """Return available ``val_hard_images.json`` files for a TrainingRun."""
+        root = Path(run.output_dir) if run.output_dir else None
+        if not root or not root.is_dir():
+            return []
+        artifacts = []
+        for path_ in sorted(root.glob("*/val_hard_images.json")):
+            try:
+                payload = json.loads(path_.read_text())
+            except (OSError, ValueError):
+                continue
+            images = payload.get("images", []) if isinstance(payload, dict) else []
+            artifacts.append({
+                "run_name": path_.parent.name,
+                "path": path_,
+                "payload": payload,
+                "count": len(images),
+            })
+        return artifacts
+
+    def _selected_hard_image_artifact(self, run, run_name=None):
+        artifacts = self._hard_image_artifacts(run)
+        if not artifacts:
+            return None
+        if run_name:
+            for artifact in artifacts:
+                if artifact["run_name"] == run_name:
+                    return artifact
+            return None
+        return artifacts[0]
+
+    def hard_images_view(self, request):
+        """Render live hard-image viewer for one TrainingRun internal run."""
+        run = TrainingRun.objects.filter(pk=request.GET.get("run")).first()
+        if run is None:
+            raise Http404("hard-images requires ?run=")
+        artifacts = self._hard_image_artifacts(run)
+        current = self._selected_hard_image_artifact(run, request.GET.get("run_name"))
+        if current is None:
+            raise Http404("no hard-images artifact for this training run")
+        payload = current["payload"]
+        choices = [
+            {
+                "run_name": artifact["run_name"],
+                "label": f"{artifact['run_name']} ({artifact['count']} images)",
+                "count": artifact["count"],
+                "query": urlencode({"run": run.pk, "run_name": artifact["run_name"]}),
+                "selected": artifact["run_name"] == current["run_name"],
+            }
+            for artifact in artifacts
+        ]
+        context = {
+            **self.admin_site.each_context(request),
+            "title": f"Live hardest val images - run #{run.pk}",
+            "subject_name": f"Run #{run.pk} - {current['run_name']}",
+            "image_count": len(payload.get("images", [])),
+            "metric": payload.get("metric", ""),
+            "metric_description": payload.get("metric_description", ""),
+            "iou_threshold": payload.get("iou_threshold"),
+            "score_threshold": payload.get("score_threshold"),
+            "query": urlencode({"run": run.pk, "run_name": current["run_name"]}),
+            "run_choices": choices,
+            "run_choices_json": json.dumps(choices),
+            "back_label": "Back to training runs",
+        }
+        return TemplateResponse(request, "admin/training/hard_images_viewer.html", context)
+
+    def hard_images_image(self, request):
+        """Stream one live hard image for a TrainingRun."""
+        run = TrainingRun.objects.filter(pk=request.GET.get("run")).first()
+        if run is None:
+            raise Http404("unknown training run")
+        artifact = self._selected_hard_image_artifact(run, request.GET.get("run_name"))
+        images = artifact["payload"].get("images", []) if artifact else []
+        index = _preview_index(request, len(images))
+        raw_path = images[index].get("image_path")
+        if not raw_path:
+            raise Http404("no image path recorded")
+        image_path = Path(raw_path).resolve()
+        root = source_root().resolve()
+        if root not in image_path.parents or not image_path.is_file():
+            raise Http404("image not found under source root")
+        return FileResponse(open(image_path, "rb"))
+
+    def hard_images_data(self, request):
+        """Return one live hard-image payload entry for a TrainingRun."""
+        run = TrainingRun.objects.filter(pk=request.GET.get("run")).first()
+        if run is None:
+            return JsonResponse({"error": "unknown training run"}, status=400)
+        artifact = self._selected_hard_image_artifact(run, request.GET.get("run_name"))
+        images = artifact["payload"].get("images", []) if artifact else []
+        if not images:
+            return JsonResponse({"error": "no hard images for this training run"}, status=400)
+        index = _preview_index(request, len(images))
+        entry = images[index]
+        return JsonResponse({
+            "predictions": entry.get("predictions", []),
+            "ground_truth": entry.get("ground_truth", []),
+            "image": entry.get("image_name", ""),
+            "difficulty": entry.get("difficulty"),
+            "missed": entry.get("missed"),
+            "false_positives": entry.get("false_positives"),
+            "wrong_class": entry.get("wrong_class"),
+            "loc_error": entry.get("loc_error"),
+            "num_predictions": entry.get("num_predictions"),
+            "num_ground_truth": entry.get("num_ground_truth"),
+            "index": index,
+            "count": len(images),
+        })
 
     @admin.action(description="Launch / relaunch on trainer service")
     def launch_selected(self, request, queryset):
@@ -444,7 +587,7 @@ class TrainedModelAdmin(admin.ModelAdmin):
     list_display = ["name", "stage", "arch", "num_classes", "map50", "map50_95", "created_at"]
     list_filter = ["stage", "arch"]
     search_fields = ["name", "description"]
-    actions = ["evaluate", "preview_on_dataset"]
+    actions = ["evaluate", "preview_on_dataset", "view_hard_val_images"]
     readonly_fields = ["source_run_result", "created_at", "updated_at"]
 
     @admin.display(description="mAP50")
@@ -639,6 +782,12 @@ class TrainedModelAdmin(admin.ModelAdmin):
                  name="training_trainedmodel_preview_image"),
             path("preview/data/", self.admin_site.admin_view(self.preview_data),
                  name="training_trainedmodel_preview_data"),
+            path("hard-images/", self.admin_site.admin_view(self.hard_images_view),
+                 name="training_trainedmodel_hard_images"),
+            path("hard-images/image/", self.admin_site.admin_view(self.hard_images_image),
+                 name="training_trainedmodel_hard_images_image"),
+            path("hard-images/data/", self.admin_site.admin_view(self.hard_images_data),
+                 name="training_trainedmodel_hard_images_data"),
         ]
         return custom + super().get_urls()
 
@@ -719,6 +868,117 @@ class TrainedModelAdmin(admin.ModelAdmin):
             "ground_truth": ground_truth,
             "classes": result.get("classes", {}),
             "image": image_path.name,
+            "index": index,
+            "count": len(images),
+        })
+
+    # -------------------------------------------------------- hardest val images
+    @admin.action(description="View 50 hardest val images…")
+    def view_hard_val_images(self, request, queryset):
+        """Open the viewer for the val images this model's training run struggled with.
+
+        The artifact (``<run_dir>/val_hard_images.json``) is produced by the trainer at
+        end-of-run, so this action just checks it exists and redirects to the viewer.
+        """
+        if queryset.count() != 1:
+            self.message_user(request, "Select exactly one model.", level=messages.WARNING)
+            return None
+        model = queryset.first()
+        artifact = self._hard_images_path(model)
+        if artifact is None or not artifact.exists():
+            self.message_user(
+                request,
+                f"No hardest-val-images artifact for {model.name} — its training run "
+                "predates this feature or had no val set with labels.",
+                level=messages.WARNING,
+            )
+            return None
+        return redirect(
+            reverse("admin:training_trainedmodel_hard_images") + "?model=" + str(model.pk))
+
+    def _hard_images_path(self, model):
+        """Locate ``val_hard_images.json`` in the source run's output dir, or None."""
+        run_result = getattr(model, "source_run_result", None)
+        run_dir = (getattr(run_result, "run_dir", "") or "").strip() if run_result else ""
+        if not run_dir:
+            return None
+        return Path(run_dir) / "val_hard_images.json"
+
+    def _load_hard_images(self, model):
+        """Parse the hard-images artifact for ``model``, or None if missing/unreadable."""
+        artifact = self._hard_images_path(model)
+        if artifact is None or not artifact.exists():
+            return None
+        try:
+            return json.loads(artifact.read_text())
+        except (ValueError, OSError):
+            return None
+
+    def hard_images_view(self, request):
+        """Render the viewer shell; the browser pulls images + precomputed boxes per index."""
+        model = TrainedModel.objects.filter(pk=request.GET.get("model")).first()
+        if model is None:
+            raise Http404("hard-images requires ?model=")
+        payload = self._load_hard_images(model)
+        if payload is None:
+            raise Http404("no hard-images artifact for this model")
+        images = payload.get("images", [])
+        context = {
+            **self.admin_site.each_context(request),
+            "title": f"Hardest val images — {model.name}",
+            "model": model,
+            "subject_name": model.name,
+            "image_count": len(images),
+            "metric": payload.get("metric", ""),
+            "metric_description": payload.get("metric_description", ""),
+            "iou_threshold": payload.get("iou_threshold"),
+            "score_threshold": payload.get("score_threshold"),
+            "query": urlencode({"model": model.pk}),
+            "run_choices": [],
+            "run_choices_json": "[]",
+            "back_label": "Back to models",
+        }
+        return TemplateResponse(request, "admin/training/hard_images_viewer.html", context)
+
+    def hard_images_image(self, request):
+        """Stream the raw bytes of the hard image at ``?index=`` (guarded to source_root)."""
+        model = TrainedModel.objects.filter(pk=request.GET.get("model")).first()
+        if model is None:
+            raise Http404("unknown model")
+        payload = self._load_hard_images(model)
+        images = payload.get("images", []) if payload else []
+        index = _preview_index(request, len(images))
+        raw_path = images[index].get("image_path")
+        if not raw_path:
+            raise Http404("no image path recorded")
+        image_path = Path(raw_path).resolve()
+        root = source_root().resolve()
+        if root not in image_path.parents or not image_path.is_file():
+            raise Http404("image not found under source root")
+        return FileResponse(open(image_path, "rb"))
+
+    def hard_images_data(self, request):
+        """Return the precomputed predictions + ground truth + difficulty for ``?index=``."""
+        model = TrainedModel.objects.filter(pk=request.GET.get("model")).first()
+        if model is None:
+            return JsonResponse({"error": "unknown model"}, status=400)
+        payload = self._load_hard_images(model)
+        images = payload.get("images", []) if payload else []
+        if not images:
+            return JsonResponse({"error": "no hard images for this model"}, status=400)
+        index = _preview_index(request, len(images))
+        entry = images[index]
+        return JsonResponse({
+            "predictions": entry.get("predictions", []),
+            "ground_truth": entry.get("ground_truth", []),
+            "image": entry.get("image_name", ""),
+            "difficulty": entry.get("difficulty"),
+            "missed": entry.get("missed"),
+            "false_positives": entry.get("false_positives"),
+            "wrong_class": entry.get("wrong_class"),
+            "loc_error": entry.get("loc_error"),
+            "num_predictions": entry.get("num_predictions"),
+            "num_ground_truth": entry.get("num_ground_truth"),
             "index": index,
             "count": len(images),
         })

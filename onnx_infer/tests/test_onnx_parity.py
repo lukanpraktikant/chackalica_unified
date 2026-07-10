@@ -26,6 +26,9 @@ pytest.importorskip("onnxruntime")
 
 from friendy_chachkalica.registry import build_model  # noqa: E402
 from friendy_chachkalica.onnx_export.arch.retinanet import export_retinanet  # noqa: E402
+from friendy_chachkalica.onnx_export.arch.yolox import export_yolox  # noqa: E402
+from friendy_chachkalica.onnx_export.arch.rtdetr import export_rtdetr  # noqa: E402
+from friendy_chachkalica.onnx_export.arch.rfdetr import export_rfdetr  # noqa: E402
 from onnx_infer import load_onnx_adapter  # noqa: E402
 
 
@@ -93,3 +96,152 @@ def test_retinanet_parity(retinanet_export, hw):
     onnx_pred = onnx_adapter.predict([image], score_threshold=threshold)[0].detach().cpu().numpy()
 
     _assert_parity(torch_pred, onnx_pred, min_dets=10)
+
+
+# --------------------------------------------------------------------------- YOLOX
+
+
+@pytest.fixture(scope="module")
+def yolox_export(tmp_path_factory):
+    torch.manual_seed(0)
+    adapter = build_model("yolox", num_classes=3, variant="yolox-nano")  # random init
+    # YOLOX inits its obj/cls heads with a prior-prob bias (~0.01), so a random
+    # model emits zero detections above any real floor — a trivial (0 == 0)
+    # comparison. Bias the obj heads high (fire everywhere) and give the cls heads
+    # spread so argmax varies, yielding a rich multi-detection + real-NMS set.
+    for obj_conv in adapter.model.head.obj_preds:
+        torch.nn.init.constant_(obj_conv.bias, 2.0)  # sigmoid(2) ~ 0.88
+    for cls_conv in adapter.model.head.cls_preds:
+        torch.nn.init.normal_(cls_conv.bias, mean=0.0, std=2.0)
+    adapter.score_threshold = 0.05
+    adapter.eval()
+    out_dir = tmp_path_factory.mktemp("yolox")
+    onnx_path = out_dir / "model.onnx"
+    meta = export_yolox(
+        adapter, num_classes=3, params={},
+        class_map={0: "a", 1: "b", 2: "c"}, onnx_path=onnx_path,
+    )
+    onnx_path.with_suffix(".meta.json").write_text(json.dumps(meta))
+    return adapter, onnx_path
+
+
+@pytest.mark.parametrize("hw", [(640, 640), (480, 640), (512, 512)])
+def test_yolox_parity(yolox_export, hw):
+    adapter, onnx_path = yolox_export
+    onnx_adapter, info = load_onnx_adapter(onnx_path, "cpu")
+    assert info["num_classes"] == 3
+
+    torch.manual_seed(1)
+    image = torch.rand(3, *hw)
+    threshold = 0.05
+    torch_pred = adapter.predict([image], score_threshold=threshold)[0].detach().cpu().numpy()
+    onnx_pred = onnx_adapter.predict([image], score_threshold=threshold)[0].detach().cpu().numpy()
+
+    _assert_parity(torch_pred, onnx_pred, min_dets=5)
+
+
+# --------------------------------------------------------------------------- RT-DETR
+
+
+@pytest.fixture(scope="module")
+def rtdetr_export(tmp_path_factory):
+    pytest.importorskip("transformers")
+    torch.manual_seed(0)
+    adapter = build_model("rtdetr", num_classes=3, weights=None)  # from scratch, offline
+    # A random-init RT-DETR has an untrained `enc_score_head`, so every one of the
+    # ~8400 encoder proposals scores the identical constant ln(1/num_classes). The
+    # encoder's query selection — `topk(enc_outputs_class.max(-1), num_queries)` —
+    # is then a topk over a fully-tied field, which torch and onnxruntime break
+    # differently: they select *different* (equally valid) query sets, cascading
+    # into completely scrambled decoder boxes. That is tie ambiguity, not an export
+    # defect (the graph is bit-identical up to the topk — verified). So we spread
+    # both heads just enough to de-tie the scores without saturating sigmoid (a
+    # 256-dim dot product amplifies the weight std ~16x, so keep std small): the
+    # encoder topk and the final scores become well-separated and backend-stable,
+    # giving a genuine multi-detection parity check. Mirrors the retinanet/yolox
+    # head surgery above.
+    inner = adapter.model.model
+    torch.nn.init.normal_(inner.enc_score_head.weight, mean=0.0, std=0.2)
+    torch.nn.init.constant_(inner.enc_score_head.bias, 0.0)
+    torch.nn.init.normal_(inner.decoder.class_embed[-1].weight, mean=0.0, std=0.15)
+    torch.nn.init.constant_(inner.decoder.class_embed[-1].bias, -2.0)
+    adapter.eval()
+    out_dir = tmp_path_factory.mktemp("rtdetr")
+    onnx_path = out_dir / "model.onnx"
+    meta = export_rtdetr(
+        adapter, num_classes=3, params={},
+        class_map={0: "a", 1: "b", 2: "c"}, onnx_path=onnx_path,
+    )
+    onnx_path.with_suffix(".meta.json").write_text(json.dumps(meta))
+    return adapter, onnx_path
+
+
+@pytest.mark.parametrize(
+    "hw",
+    [
+        (512, 512),   # <= max_size, multiple of 32: no resize, no pad (byte-identical input)
+        (480, 640),   # ditto
+        (704, 512),   # longest > 640: exercises longest-side resize + pad-to-32
+    ],
+)
+def test_rtdetr_parity(rtdetr_export, hw):
+    adapter, onnx_path = rtdetr_export
+    onnx_adapter, info = load_onnx_adapter(onnx_path, "cpu")
+    assert info["num_classes"] == 3
+
+    torch.manual_seed(1)
+    image = torch.rand(3, *hw)
+    threshold = 0.5
+    torch_pred = adapter.predict([image], score_threshold=threshold)[0].detach().cpu().numpy()
+    onnx_pred = onnx_adapter.predict([image], score_threshold=threshold)[0].detach().cpu().numpy()
+
+    # RT-DETR is NMS-free and returns normalized boxes; a resized case leans on the
+    # service's resize matching torch's F.interpolate, so allow a slightly looser tol.
+    atol = 1e-3 if hw[0] <= 640 and hw[1] <= 640 else 5e-3
+    _assert_parity(torch_pred, onnx_pred, min_dets=5, atol=atol)
+
+
+# --------------------------------------------------------------------------- RF-DETR
+
+
+@pytest.fixture(scope="module")
+def rfdetr_export(tmp_path_factory):
+    pytest.importorskip("rfdetr")
+    torch.manual_seed(0)
+    # From scratch, offline, smallest variant at a small resolution for speed.
+    # Unlike RT-DETR, a random-init RF-DETR does NOT hit topk-tie degeneracy: its
+    # class head is prior-bias initialized and the box/class heads are continuous,
+    # so the (internal two-stage + final) top-k selections are well-separated and
+    # backend-stable. No head surgery needed.
+    adapter = build_model("rfdetr", num_classes=3, variant="nano", weights=False, resolution=224)
+    adapter.eval()
+    out_dir = tmp_path_factory.mktemp("rfdetr")
+    onnx_path = out_dir / "model.onnx"
+    meta = export_rfdetr(
+        adapter, num_classes=3, params={},
+        class_map={0: "a", 1: "b", 2: "c"}, onnx_path=onnx_path,
+    )
+    onnx_path.with_suffix(".meta.json").write_text(json.dumps(meta))
+    return adapter, onnx_path
+
+
+@pytest.mark.parametrize("hw", [(480, 640), (512, 512), (720, 480)])
+def test_rfdetr_parity(rfdetr_export, hw):
+    adapter, onnx_path = rfdetr_export
+    onnx_adapter, info = load_onnx_adapter(onnx_path, "cpu")
+    assert info["num_classes"] == 3
+
+    torch.manual_seed(1)
+    image = torch.rand(3, *hw)
+    # A random-init RF-DETR's prior-biased head keeps every score well below any
+    # real floor, so a positive threshold yields zero detections (a trivial
+    # comparison). Compare the full post-top-k set (threshold 0) instead — a rich,
+    # non-trivial check of box decode + top-k + background drop + square resize.
+    threshold = 0.0
+    torch_pred = adapter.predict([image], score_threshold=threshold)[0].detach().cpu().numpy()
+    onnx_pred = onnx_adapter.predict([image], score_threshold=threshold)[0].detach().cpu().numpy()
+
+    # RF-DETR always applies an aspect-changing square resize, so parity leans on
+    # the service's numpy resize matching torch's bilinear F.interpolate; allow the
+    # same looser tol as the RT-DETR resized cases.
+    _assert_parity(torch_pred, onnx_pred, min_dets=20, atol=5e-3)

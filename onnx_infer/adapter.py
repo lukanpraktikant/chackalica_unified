@@ -50,7 +50,11 @@ class OnnxAdapter:
             batched, transform = preprocess(chw, self.meta)
             raw = self._model.run(batched)
             boxes, scores, labels = self._handler.adapt_outputs(raw)
-            friendy = to_friendy(boxes, scores, labels, transform, threshold)
+            friendy = to_friendy(
+                boxes, scores, labels, transform, threshold,
+                clip_boxes=self.meta.clip_boxes,
+                box_coords=self.meta.box_coords,
+            )
             results.append(torch.from_numpy(friendy))
         return results
 

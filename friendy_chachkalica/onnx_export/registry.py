@@ -14,11 +14,20 @@ from __future__ import annotations
 
 try:
     from .arch.retinanet import export_retinanet
+    from .arch.rfdetr import export_rfdetr
+    from .arch.rtdetr import export_rtdetr
+    from .arch.yolox import export_yolox
 except ImportError:  # run as a flat script
     from arch.retinanet import export_retinanet
+    from arch.rfdetr import export_rfdetr
+    from arch.rtdetr import export_rtdetr
+    from arch.yolox import export_yolox
 
 EXPORT_REGISTRY = {
     "retinanet": export_retinanet,
+    "yolox": export_yolox,
+    "rtdetr": export_rtdetr,
+    "rfdetr": export_rfdetr,
 }
 
 

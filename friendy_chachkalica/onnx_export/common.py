@@ -29,6 +29,8 @@ def build_meta(
     pad_value: float = 0.0,
     input_scale: str = "unit",
     normalize: Optional[dict] = None,
+    clip_boxes: bool = False,
+    box_coords: str = "input_pixels",
 ) -> dict:
     input_spec = {
         "resize_mode": resize_mode,
@@ -50,7 +52,8 @@ def build_meta(
         "input": input_spec,
         "normalize": normalize,
         "layout": "rgb",
-        "box_coords": "input_pixels",
+        "box_coords": box_coords,
+        "clip_boxes": bool(clip_boxes),
     }
 
 

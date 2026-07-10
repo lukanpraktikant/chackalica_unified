@@ -1,0 +1,48 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+<p>Preview the labels of dataset <strong>{{ dataset.name }}</strong> — draw the on-disk
+annotations on each image and scroll through them. No model is run and nothing is saved.</p>
+<p class="help">Pick where the labels come from: the dataset's own <em>source labels</em>,
+an <em>annotator</em>'s output, or an <em>explicit path</em>. Choose the annotator only for
+annotator output, and the path only for an explicit path.</p>
+
+<form action="" method="post">
+  {% csrf_token %}
+  {% for pk in selected %}
+    <input type="hidden" name="{{ action_checkbox_name }}" value="{{ pk }}">
+  {% endfor %}
+  <input type="hidden" name="action" value="{{ action }}">
+  <input type="hidden" name="apply" value="1">
+
+  <div class="form-row">
+    <label for="label_source">Label source:</label>
+    <select name="label_source" id="label_source">
+      {% for value, label in label_source_choices %}
+        <option value="{{ value }}" {% if value == default_label_source %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    <p class="help">Which on-disk labels to draw.</p>
+  </div>
+
+  <div class="form-row">
+    <label for="annotator">Annotator:</label>
+    <select name="annotator" id="annotator">
+      <option value="">—</option>
+      {% for a in annotators %}<option value="{{ a.pk }}">{{ a.username }}</option>{% endfor %}
+    </select>
+    <p class="help">Only used when the label source is annotator output.</p>
+  </div>
+
+  <div class="form-row">
+    <label for="explicit_labels_path">Explicit labels path:</label>
+    <input type="text" name="explicit_labels_path" id="explicit_labels_path" size="60">
+    <p class="help">Only used when the label source is explicit path.</p>
+  </div>
+
+  <div class="submit-row">
+    <input type="submit" class="default" value="Open preview">
+    <a href="../" class="button cancel-link">Cancel</a>
+  </div>
+</form>
+{% endblock %}

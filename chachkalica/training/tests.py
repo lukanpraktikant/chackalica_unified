@@ -74,6 +74,8 @@ class ConfigGenTests(TestCase):
         self.assertEqual(model["num_classes"], "auto")
         self.assertEqual(model["variant"], "resnet50_fpn_v2")
 
+        self.assertEqual(data["evaluation"]["map_score_threshold"], 0.001)
+
         # cosine scheduler -> a dict with name; none -> None
         self.assertEqual(data["training"]["scheduler"], {"name": "cosine"})
 

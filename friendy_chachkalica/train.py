@@ -1,4 +1,5 @@
 import argparse
+import json
 import random
 import time
 from dataclasses import asdict, is_dataclass
@@ -14,13 +15,25 @@ try:
     from .config import DatasetConfig, ExperimentConfig, ExperimentRun, build_experiment_runs, load_config
     from .data import build_eval_dataloader, build_train_dataloader
     from .device import resolve_device
-    from .metrics import evaluate_detection
+    from .metrics import (
+        HARD_IMAGE_METRIC,
+        HARD_IMAGE_METRIC_DESCRIPTION,
+        evaluate_detection,
+        select_hard_images,
+    )
+    from .postprocess import apply_class_aware_nms
     from .registry import build_model
 except ImportError:
     from config import DatasetConfig, ExperimentConfig, ExperimentRun, build_experiment_runs, load_config
     from data import build_eval_dataloader, build_train_dataloader
     from device import resolve_device
-    from metrics import evaluate_detection
+    from metrics import (
+        HARD_IMAGE_METRIC,
+        HARD_IMAGE_METRIC_DESCRIPTION,
+        evaluate_detection,
+        select_hard_images,
+    )
+    from postprocess import apply_class_aware_nms
     from registry import build_model
 
 
@@ -273,6 +286,7 @@ def train_model(
                 val_loader,
                 device,
                 config=config,
+                hard_images_path=run_dir / "val_predictions.pt",
                 prediction_classes=train_dataset_config.classes,
                 target_classes=(
                     run.val_dataset.classes
@@ -478,30 +492,44 @@ def evaluate_map(
     loader: DataLoader,
     device: torch.device,
     config: ExperimentConfig,
+    hard_images_path: Optional[str | Path] = None,
     prediction_classes: Optional[Dict[int, str]] = None,
     target_classes: Optional[Dict[int, str]] = None,
 ) -> Dict[str, Any]:
-    """Predict over a loader and compute detection metrics (no files written).
+    """Predict over a loader and compute detection metrics.
 
     Used for per-epoch validation so best-checkpoint selection and early
-    stopping can track val mAP instead of val loss. Predictions are remapped by
-    class name onto ``target_classes``, mirroring ``predict_dataset``.
+    stopping can track val mAP instead of val loss. When ``hard_images_path`` is
+    supplied, it also refreshes the live ``val_hard_images.json`` viewer artifact.
+    Predictions are remapped by class name onto ``target_classes``, mirroring
+    ``predict_dataset``.
     """
     was_training = adapter.model.training
     adapter.eval()
     all_predictions = []
     all_targets = []
+    records = []
     try:
         for images, targets in loader:
             images, targets = _move_batch_to_device(images, targets, device)
             predictions = _predict_with_config(adapter, images, config)
+            predictions = _apply_eval_nms(predictions, config)
             for target, prediction in zip(targets, predictions):
-                all_predictions.append(prediction.detach().cpu())
-                all_targets.append(_target_to_cpu(target))
+                prediction = prediction.detach().cpu()
+                target_cpu = _target_to_cpu(target)
+                all_predictions.append(prediction)
+                all_targets.append(target_cpu)
+                records.append(
+                    {
+                        "image_path": target.get("image_path"),
+                        "label_path": target.get("label_path"),
+                        "orig_size": _cpu_value(target.get("orig_size")),
+                    }
+                )
     finally:
         adapter.train(was_training)
 
-    return evaluate_detection(
+    metrics = evaluate_detection(
         all_predictions,
         all_targets,
         iou_thresholds=config.evaluation.iou_thresholds,
@@ -511,6 +539,25 @@ def evaluate_map(
         target_classes=target_classes,
         eval_classes=target_classes,
     )
+    _print_eval_map_debug(
+        metrics,
+        all_predictions,
+        all_targets,
+        prediction_classes=prediction_classes,
+        target_classes=target_classes,
+    )
+    if hard_images_path is not None:
+        _write_hard_images(
+            hard_images_path,
+            all_predictions,
+            all_targets,
+            records,
+            config=config,
+            prediction_classes=prediction_classes,
+            target_classes=target_classes,
+            eval_classes=target_classes,
+        )
+    return metrics
 
 
 @torch.no_grad()
@@ -535,6 +582,7 @@ def predict_dataset(
     for batch_index, (images, targets) in enumerate(loader, start=1):
         images, targets = _move_batch_to_device(images, targets, device)
         predictions = _predict_with_config(adapter, images, config)
+        predictions = _apply_eval_nms(predictions, config)
         print(f"[train] Predicted batch {batch_index}: images={len(images)}")
         for target, prediction in zip(targets, predictions):
             prediction = prediction.detach().cpu()
@@ -572,7 +620,121 @@ def predict_dataset(
         f"map50_95={metrics.get('map50_95')} precision={metrics.get('precision')} "
         f"recall={metrics.get('recall')} eval_seconds={metrics.get('eval_seconds')}"
     )
+
+    _write_hard_images(
+        output_path,
+        all_predictions,
+        all_targets,
+        records,
+        config=config,
+        prediction_classes=prediction_classes,
+        target_classes=target_classes,
+        eval_classes=eval_classes,
+    )
     return metrics
+
+
+def _write_hard_images(
+    predictions_path: str | Path,
+    all_predictions: List[torch.Tensor],
+    all_targets: List[Dict[str, Any]],
+    records: List[Dict[str, Any]],
+    *,
+    config: Optional[ExperimentConfig],
+    prediction_classes: Optional[Dict[int, str]],
+    target_classes: Optional[Dict[int, str]],
+    eval_classes: Optional[Dict[int, str]],
+    top_k: int = 50,
+    iou_threshold: float = 0.5,
+    score_threshold: float = 0.25,
+) -> None:
+    """Persist the ``top_k`` hardest images alongside the predictions file.
+
+    Writes ``<split>_hard_images.json`` next to ``<split>_predictions.pt`` (self-contained:
+    image paths + normalized boxes + class names), which the admin viewer renders. Guarded so
+    a split with no ground truth is skipped and any failure never sinks the eval that already
+    produced its metrics.
+
+    ``score_threshold`` is a human operating point (default 0.25), intentionally NOT the eval
+    ``score_threshold`` — that is usually the near-zero AP-integration floor (e.g. 0.001), which
+    would drown the difficulty score in low-confidence false positives.
+    """
+    if not all_targets or not any(int(target['labels'].numel()) for target in all_targets):
+        print("[train] Skipping hard-images artifact: no ground-truth labels in split")
+        return
+
+    predictions_path = Path(predictions_path)
+    if predictions_path.name.endswith("_predictions.pt"):
+        out_name = predictions_path.name[: -len("_predictions.pt")] + "_hard_images.json"
+    else:
+        out_name = predictions_path.stem + "_hard_images.json"
+    output_path = predictions_path.with_name(out_name)
+
+    try:
+        images = select_hard_images(
+            all_predictions,
+            all_targets,
+            records,
+            top_k=top_k,
+            iou_threshold=iou_threshold,
+            score_threshold=score_threshold,
+            prediction_classes=prediction_classes,
+            target_classes=target_classes,
+            eval_classes=eval_classes,
+        )
+        payload = {
+            "metric": HARD_IMAGE_METRIC,
+            "metric_description": HARD_IMAGE_METRIC_DESCRIPTION,
+            "iou_threshold": float(iou_threshold),
+            "score_threshold": float(score_threshold),
+            "top_k": int(top_k),
+            "num_images_ranked": len(all_targets),
+            "images": images,
+        }
+        output_path.write_text(json.dumps(payload, indent=2))
+        print(f"[train] Saved hard images: {output_path} count={len(images)}")
+    except Exception as exc:  # noqa: BLE001 - artifact is best-effort; never break the eval
+        print(f"[train] WARNING: failed to write hard images ({output_path}): {exc}")
+
+
+def _print_eval_map_debug(
+    metrics: Dict[str, Any],
+    predictions: List[torch.Tensor],
+    targets: List[Dict[str, Any]],
+    *,
+    prediction_classes: Optional[Dict[int, str]],
+    target_classes: Optional[Dict[int, str]],
+) -> None:
+    raw_predictions = int(sum(prediction.shape[0] for prediction in predictions if prediction is not None))
+    max_score = None
+    score_parts = [prediction[:, 4].detach().cpu() for prediction in predictions if prediction is not None and prediction.numel()]
+    if score_parts:
+        max_score = round(float(torch.cat(score_parts).max().item()), 4)
+    target_count = int(sum(int(target["labels"].numel()) for target in targets))
+    pred_names = {str(name) for name in (prediction_classes or {}).values()}
+    target_names = {str(name) for name in (target_classes or {}).values()}
+    common_names = sorted(pred_names & target_names)
+    print(
+        "[train] Val mAP debug: "
+        f"raw_predictions={raw_predictions} "
+        f"operating_predictions={metrics.get('num_predictions')} "
+        f"targets={target_count} max_score={max_score} "
+        f"eval_classes_with_gt={metrics.get('num_eval_classes_with_gt')}/"
+        f"{metrics.get('num_eval_classes')} "
+        f"class_name_overlap={len(common_names)}"
+    )
+    if prediction_classes is not None and target_classes is not None and len(common_names) < len(target_names):
+        missing = sorted(target_names - pred_names)
+        if missing:
+            print(f"[train] Val mAP debug: target classes not predicted by this model: {missing}")
+
+
+def _apply_eval_nms(
+    predictions: List[torch.Tensor],
+    config: Optional[ExperimentConfig],
+) -> List[torch.Tensor]:
+    threshold = 0.45 if config is None else config.evaluation.nms_threshold
+    return [apply_class_aware_nms(prediction, threshold) for prediction in predictions]
 
 
 def _predict_with_config(
