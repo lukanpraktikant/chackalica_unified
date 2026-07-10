@@ -191,6 +191,7 @@ def select_hard_images(
     prediction_classes: Optional[Dict[int, str]] = None,
     target_classes: Optional[Dict[int, str]] = None,
     eval_classes: Optional[Dict[int, str]] = None,
+    max_display_predictions: Optional[int] = 20,
 ) -> list[Dict[str, Any]]:
     """Rank images by a per-image detection-error score and return the worst ``top_k``.
 
@@ -198,7 +199,8 @@ def select_hard_images(
     prepared and remapped into the eval class space exactly like :func:`evaluate_detection`,
     so the boxes returned (normalized center-xywh, with resolved class names) match the score.
     Each entry is self-contained for a viewer: image path/name, difficulty + component
-    breakdown, and prediction/ground-truth boxes.
+    breakdown, and prediction/ground-truth boxes. Displayed predictions are capped by
+    confidence so low-threshold artifacts stay readable in the browser.
     """
     prepared_targets = [_prepare_target(target) for target in targets]
     prepared_predictions = [
@@ -252,12 +254,31 @@ def select_hard_images(
             'loc_error': round(float(loc_error), 4),
             'num_predictions': int(prediction['labels'].numel()),
             'num_ground_truth': int(target['labels'].numel()),
-            'predictions': _boxes_for_display(prediction, width, height, name_lookup, with_score=True),
+            'predictions': _boxes_for_display(
+                _limit_predictions_for_display(prediction, max_display_predictions),
+                width,
+                height,
+                name_lookup,
+                with_score=True,
+            ),
             'ground_truth': _boxes_for_display(target, width, height, name_lookup, with_score=False),
         })
 
     scored.sort(key=lambda entry: entry['difficulty'], reverse=True)
     return scored[:int(top_k)]
+
+
+def _limit_predictions_for_display(detection, max_predictions: Optional[int]):
+    if max_predictions is None or int(max_predictions) <= 0:
+        return detection
+    if detection['scores'].numel() <= int(max_predictions):
+        return detection
+    keep = torch.argsort(detection['scores'], descending=True, stable=True)[: int(max_predictions)]
+    return {
+        'boxes': detection['boxes'][keep],
+        'scores': detection['scores'][keep],
+        'labels': detection['labels'][keep],
+    }
 
 
 def _boxes_for_display(detection, image_width, image_height, name_lookup, with_score):

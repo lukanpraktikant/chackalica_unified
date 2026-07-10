@@ -646,22 +646,28 @@ def _write_hard_images(
     eval_classes: Optional[Dict[int, str]],
     top_k: int = 50,
     iou_threshold: float = 0.5,
-    score_threshold: float = 0.25,
+    score_threshold: Optional[float] = None,
+    max_display_predictions: int = 20,
 ) -> None:
     """Persist the ``top_k`` hardest images alongside the predictions file.
 
     Writes ``<split>_hard_images.json`` next to ``<split>_predictions.pt`` (self-contained:
     image paths + normalized boxes + class names), which the admin viewer renders. Guarded so
     a split with no ground truth is skipped and any failure never sinks the eval that already
-    produced its metrics.
-
-    ``score_threshold`` is a human operating point (default 0.25), intentionally NOT the eval
-    ``score_threshold`` — that is usually the near-zero AP-integration floor (e.g. 0.001), which
-    would drown the difficulty score in low-confidence false positives.
+    produced its metrics. The saved artifact keeps low-confidence predictions so the browser
+    confidence slider can decide what to display.
     """
     if not all_targets or not any(int(target['labels'].numel()) for target in all_targets):
         print("[train] Skipping hard-images artifact: no ground-truth labels in split")
         return
+
+    if score_threshold is None:
+        if config is not None and config.evaluation.map_score_threshold is not None:
+            score_threshold = config.evaluation.map_score_threshold
+        elif config is not None:
+            score_threshold = config.evaluation.score_threshold
+        else:
+            score_threshold = 0.001
 
     predictions_path = Path(predictions_path)
     if predictions_path.name.endswith("_predictions.pt"):
@@ -681,12 +687,14 @@ def _write_hard_images(
             prediction_classes=prediction_classes,
             target_classes=target_classes,
             eval_classes=eval_classes,
+            max_display_predictions=max_display_predictions,
         )
         payload = {
             "metric": HARD_IMAGE_METRIC,
             "metric_description": HARD_IMAGE_METRIC_DESCRIPTION,
             "iou_threshold": float(iou_threshold),
             "score_threshold": float(score_threshold),
+            "max_display_predictions": int(max_display_predictions),
             "top_k": int(top_k),
             "num_images_ranked": len(all_targets),
             "images": images,

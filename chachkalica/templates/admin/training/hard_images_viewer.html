@@ -34,7 +34,7 @@ Use ← / → or the buttons to step through.</p>
 
 <div id="pv-metric">
   Ranking metric: <code>{{ metric }}</code> — {{ metric_description }}
-  (IoU ≥ {{ iou_threshold }}, score ≥ {{ score_threshold }}).
+  (ranked/saved at IoU ≥ {{ iou_threshold }}, score ≥ {{ score_threshold }}; up to {{ max_display_predictions|default:"20" }} highest-confidence predictions saved per image; use the confidence slider to filter visible predictions).
   <div id="pv-breakdown"></div>
 </div>
 
@@ -46,8 +46,8 @@ Use ← / → or the buttons to step through.</p>
     <button type="button" id="pv-next" class="button">Next →</button>
   </div>
   <div class="pv-group">
-    <label for="pv-conf">Confidence ≥ <span id="pv-conf-val">0.25</span></label>
-    <input type="range" id="pv-conf" min="0" max="1" step="0.01" value="0.25">
+    <label for="pv-conf">Confidence ≥ <span id="pv-conf-val">{{ score_threshold|default:"0.25" }}</span></label>
+    <input type="range" id="pv-conf" min="0" max="1" step="0.001" value="{{ score_threshold|default:"0.25" }}">
   </div>
   <div class="pv-group">
     <label><input type="checkbox" id="pv-gt" checked> Show ground truth</label>
