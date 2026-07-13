@@ -134,14 +134,35 @@ def evaluate_detection(
     ]
 
     confusion_iou = 0.5 if 0.5 in thresholds else thresholds[0]
-    confusion = _confusion_matrix(
-        prepared_predictions,
+    # Build the confusion matrix from a compact event histogram computed down to a
+    # low confidence floor, so the analytics page can re-threshold it interactively
+    # without re-running the eval. Greedy score-descending matching means matching at
+    # the floor and cutting at any higher threshold reproduces matching at that
+    # threshold exactly, so the derived matrix at operating_threshold equals a direct
+    # computation. The floor is capped at operating_threshold so that point is always
+    # representable in the stored data.
+    confusion_floor = min(0.01, operating_threshold)
+    floor_predictions = [
+        _prepare_prediction(prediction, target, confusion_floor)
+        for prediction, target in zip(predictions, prepared_targets)
+    ]
+    if effective_eval_classes is not None:
+        eval_name_to_id = {str(name): int(class_id) for class_id, name in effective_eval_classes.items()}
+        prediction_id_to_name = _normalize_class_map(prediction_classes)
+        if prediction_id_to_name is not None:
+            floor_predictions = [
+                _remap_prediction(prediction, prediction_id_to_name, eval_name_to_id)
+                for prediction in floor_predictions
+            ]
+    confusion_data = _confusion_matrix_data(
+        floor_predictions,
         prepared_targets,
         class_ids,
         effective_eval_classes,
         iou_threshold=confusion_iou,
-        conf_threshold=operating_threshold,
+        floor=confusion_floor,
     )
+    confusion = _matrix_from_confusion_data(confusion_data, operating_threshold)
 
     return {
         'map50': _mean([ap50_by_class[class_id] for class_id in classes_with_gt if class_id in ap50_by_class]),
@@ -157,6 +178,7 @@ def evaluate_detection(
         'num_targets': int(sum(len(target['labels']) for target in prepared_targets)),
         'iou_thresholds': thresholds,
         'confusion_matrix': confusion,
+        'confusion_matrix_data': confusion_data,
         'per_class': {
             int(class_id): {
                 'class_name': _class_name(effective_eval_classes, class_id),
@@ -790,6 +812,112 @@ def _confusion_matrix(
         'labels': [_class_name(eval_classes, class_id) or str(class_id) for class_id in class_ids],
         'background_index': background,
         'iou_threshold': float(iou_threshold),
+        'conf_threshold': float(conf_threshold),
+        'matrix': matrix,
+    }
+
+
+def _score_bucket(score: float) -> int:
+    """Quantise a confidence score to an integer 0-100 bucket (0.01 granularity)."""
+    return max(0, min(100, int(round(float(score) * 100))))
+
+
+def _confusion_matrix_data(
+    predictions,
+    targets,
+    class_ids,
+    eval_classes: Optional[Dict[int, str]],
+    iou_threshold: float,
+    floor: float,
+) -> Dict[str, Any]:
+    """Build a re-thresholdable confusion-matrix event histogram at one IoU threshold.
+
+    Predictions are matched greedily by descending score (class-agnostic, one gt per
+    prediction) exactly as :func:`_confusion_matrix` does, but over predictions kept
+    down to ``floor`` rather than a fixed operating point. Each match/false-positive is
+    recorded with its confidence quantised to a 0-100 bucket, and never-claimed ground
+    truths are tallied per class. Because raising the confidence threshold only drops
+    the lowest-scoring predictions — which greedy matching processes last — a matrix at
+    any threshold ``T >= floor`` can be rebuilt from these events by
+    :func:`_matrix_from_confusion_data`: a match whose score falls below ``T`` turns its
+    ground truth into a miss, and a false positive below ``T`` disappears.
+
+    Returns a compact dict (bounded by ``(len(class_ids)+1)^2 * 100`` regardless of the
+    number of detections) suitable for storing in the metrics JSON and re-thresholding
+    client-side.
+    """
+    index_of = {int(class_id): position for position, class_id in enumerate(class_ids)}
+    matched: Dict[tuple, int] = {}
+    false_positives: Dict[tuple, int] = {}
+    misses = [0] * len(class_ids)
+
+    for prediction, target in zip(predictions, targets):
+        gt_labels = target['labels']
+        result = match_image(prediction, target, iou_threshold)
+
+        for pair in result['matches']:
+            truth = index_of.get(int(gt_labels[pair['gt_index']]))
+            predicted = index_of.get(int(prediction['labels'][pair['pred_index']]))
+            if truth is None or predicted is None:
+                continue
+            bucket = _score_bucket(float(prediction['scores'][pair['pred_index']]))
+            key = (truth, predicted, bucket)
+            matched[key] = matched.get(key, 0) + 1
+
+        for pred_index in result['false_positives']:
+            predicted = index_of.get(int(prediction['labels'][pred_index]))
+            if predicted is None:
+                continue
+            bucket = _score_bucket(float(prediction['scores'][pred_index]))
+            key = (predicted, bucket)
+            false_positives[key] = false_positives.get(key, 0) + 1
+
+        for gt_index in result['misses']:
+            truth = index_of.get(int(gt_labels[gt_index]))
+            if truth is not None:
+                misses[truth] += 1
+
+    return {
+        'labels': [_class_name(eval_classes, class_id) or str(class_id) for class_id in class_ids],
+        'background_index': len(class_ids),
+        'iou_threshold': float(iou_threshold),
+        'floor': float(floor),
+        'matched': [[truth, predicted, bucket, count] for (truth, predicted, bucket), count in sorted(matched.items())],
+        'false_positives': [[predicted, bucket, count] for (predicted, bucket), count in sorted(false_positives.items())],
+        'misses': misses,
+    }
+
+
+def _matrix_from_confusion_data(data: Dict[str, Any], conf_threshold: float) -> Dict[str, Any]:
+    """Reconstruct a confusion matrix at ``conf_threshold`` from an event histogram.
+
+    Mirrors the client-side re-thresholding: matches at or above the threshold land on
+    ``matrix[truth][pred]``, matches below it become misses (``matrix[truth][background]``),
+    false positives above it land on ``matrix[background][pred]`` and below it vanish, and
+    never-claimed ground truths are always misses. See :func:`_confusion_matrix_data`.
+    """
+    background = int(data['background_index'])
+    size = background + 1
+    matrix = [[0] * size for _ in range(size)]
+    cut = _score_bucket(conf_threshold)
+
+    for truth, predicted, bucket, count in data['matched']:
+        if bucket >= cut:
+            matrix[truth][predicted] += count
+        else:
+            matrix[truth][background] += count
+
+    for predicted, bucket, count in data['false_positives']:
+        if bucket >= cut:
+            matrix[background][predicted] += count
+
+    for truth, count in enumerate(data['misses']):
+        matrix[truth][background] += count
+
+    return {
+        'labels': list(data['labels']),
+        'background_index': background,
+        'iou_threshold': float(data['iou_threshold']),
         'conf_threshold': float(conf_threshold),
         'matrix': matrix,
     }

@@ -37,6 +37,20 @@
   .ds-issues { margin: 4px 0; padding-left: 18px; color: #e6c07a; font-size: 13px; }
   .ds-issues li { margin: 2px 0; }
   .ds-ok { color: #34d399; }
+  .ds-fix-trigger { color: #e6c07a; cursor: pointer; border: 0; background: transparent;
+                    padding: 0; font: inherit; text-align: left; text-decoration: underline dotted #e6c07a 1px;
+                    text-underline-offset: 3px; }
+  .ds-fix-trigger:hover { color: #34d399; text-decoration-color: #34d399; }
+  .ds-modal-backdrop { position: fixed; inset: 0; z-index: 1100; background: rgba(0,0,0,.55);
+                       display: none; align-items: center; justify-content: center; padding: 18px; }
+  .ds-modal-backdrop.show { display: flex; }
+  .ds-modal { width: min(460px, 100%); background: #0f1a12; border: 1px solid #34d399;
+              border-radius: 8px; box-shadow: 0 12px 36px rgba(0,0,0,.65); color: #d7e7dd;
+              padding: 18px; }
+  .ds-modal h3 { color: #34d399; margin: 0 0 8px; font-size: 16px; }
+  .ds-modal p { margin: 0 0 14px; font-size: 13px; line-height: 1.45; }
+  .ds-modal-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+  .ds-modal-status { min-height: 18px; margin-top: 10px; color: #9bb7a6; font-size: 12px; }
 
   /* Click-for-info affordance: any element carrying a metric explanation. */
   .ds-info { cursor: help; position: relative; }
@@ -164,10 +178,10 @@
          data-info="Automatic checks for common annotation problems: orphan label files with no matching image, class indices outside classes.txt, boxes extending past the image edge, and zero/negative-area boxes.">Data quality</div>
     {% if report.quality.issue_total %}
     <ul class="ds-issues">
-      {% if report.quality.orphan_label_files %}<li>⚠ {{ report.quality.orphan_label_files }} orphan label file(s) — no matching image{% if report.quality.orphan_examples %} (e.g. {{ report.quality.orphan_examples|join:", " }}){% endif %}.</li>{% endif %}
-      {% if report.quality.invalid_class_regions %}<li>⚠ {{ report.quality.invalid_class_regions }} region(s) with a class index outside classes.txt (ignored in the stats above).</li>{% endif %}
-      {% if report.quality.out_of_bounds_boxes %}<li>⚠ {{ report.quality.out_of_bounds_boxes }} box(es) extending outside the image bounds.</li>{% endif %}
-      {% if report.quality.zero_area_boxes %}<li>⚠ {{ report.quality.zero_area_boxes }} box(es) with zero/negative area.</li>{% endif %}
+      {% if report.quality.orphan_label_files %}<li><button type="button" class="ds-fix-trigger" data-dataset-id="{{ report.dataset.pk }}" data-dataset-name="{{ report.dataset.name }}" data-fix-issue="orphan_label_files" data-primary-action="delete" data-primary-label="Delete orphan label files" data-message="Delete {{ report.quality.orphan_label_files }} label file(s) that do not match any image? Changed files are backed up first.">Warning: {{ report.quality.orphan_label_files }} orphan label file(s) - no matching image{% if report.quality.orphan_examples %} (e.g. {{ report.quality.orphan_examples|join:", " }}){% endif %}.</button></li>{% endif %}
+      {% if report.quality.invalid_class_regions %}<li><button type="button" class="ds-fix-trigger" data-dataset-id="{{ report.dataset.pk }}" data-dataset-name="{{ report.dataset.name }}" data-fix-issue="invalid_class_regions" data-primary-action="remove" data-primary-label="Remove invalid regions" data-message="Remove {{ report.quality.invalid_class_regions }} region(s) whose class index is outside classes.txt? Changed files are backed up first.">Warning: {{ report.quality.invalid_class_regions }} region(s) with a class index outside classes.txt (ignored in the stats above).</button></li>{% endif %}
+      {% if report.quality.out_of_bounds_boxes %}<li><button type="button" class="ds-fix-trigger" data-dataset-id="{{ report.dataset.pk }}" data-dataset-name="{{ report.dataset.name }}" data-fix-issue="out_of_bounds_boxes" data-primary-action="clip" data-primary-label="Clip boxes" data-secondary-action="remove" data-secondary-label="Remove boxes" data-message="Fix {{ report.quality.out_of_bounds_boxes }} box(es) extending outside the image bounds? Clipping preserves labels by fitting them to the image. Changed files are backed up first.">Warning: {{ report.quality.out_of_bounds_boxes }} box(es) extending outside the image bounds.</button></li>{% endif %}
+      {% if report.quality.zero_area_boxes %}<li><button type="button" class="ds-fix-trigger" data-dataset-id="{{ report.dataset.pk }}" data-dataset-name="{{ report.dataset.name }}" data-fix-issue="zero_area_boxes" data-primary-action="remove" data-primary-label="Remove zero-area boxes" data-message="Remove {{ report.quality.zero_area_boxes }} box(es) with zero/negative area? Changed files are backed up first.">Warning: {{ report.quality.zero_area_boxes }} box(es) with zero/negative area.</button></li>{% endif %}
     </ul>
     {% else %}
       <p class="ds-note ds-ok">✓ No data-quality issues detected.</p>
@@ -182,7 +196,26 @@
   {% endif %}
 {% endfor %}
 
+  <form id="ds-refresh-form" method="post" style="display:none;">
+    {% csrf_token %}
+    <input type="hidden" name="action" value="{{ action }}">
+    {% for pk in selected %}<input type="hidden" name="{{ action_checkbox_name }}" value="{{ pk }}">{% endfor %}
+  </form>
+
   <p style="margin-top:2em;"><a href="../" class="button cancel-link">Back</a></p>
+</div>
+
+<div class="ds-modal-backdrop" id="ds-fix-modal" role="dialog" aria-modal="true" aria-live="polite">
+  <div class="ds-modal">
+    <h3></h3>
+    <p class="ds-fix-message"></p>
+    <div class="ds-modal-actions">
+      <button type="button" class="button cancel-link ds-fix-cancel">Cancel</button>
+      <button type="button" class="button ds-fix-secondary" style="display:none;"></button>
+      <button type="button" class="button default ds-fix-primary"></button>
+    </div>
+    <div class="ds-modal-status"></div>
+  </div>
 </div>
 
 <div class="ds-popover" id="ds-popover" role="dialog" aria-live="polite">
@@ -197,6 +230,15 @@
   var titleEl = pop.querySelector('.ds-pop-title');
   var bodyEl = pop.querySelector('.ds-pop-body');
   var current = null;
+  var modal = document.getElementById('ds-fix-modal');
+  var modalTitle = modal.querySelector('h3');
+  var modalMessage = modal.querySelector('.ds-fix-message');
+  var modalStatus = modal.querySelector('.ds-modal-status');
+  var primaryBtn = modal.querySelector('.ds-fix-primary');
+  var secondaryBtn = modal.querySelector('.ds-fix-secondary');
+  var cancelBtn = modal.querySelector('.ds-fix-cancel');
+  var selectedFix = null;
+  var fixUrl = "{% url 'admin:fleet_dataset_quality_fix' %}";
 
   function hide() {
     pop.classList.remove('show');
@@ -219,9 +261,75 @@
     pop.style.left = left + 'px';
   }
 
+  function csrfToken() {
+    var input = document.querySelector('input[name=csrfmiddlewaretoken]');
+    return input ? input.value : '';
+  }
+
+  function closeFixModal() {
+    modal.classList.remove('show');
+    selectedFix = null;
+    modalStatus.textContent = '';
+    primaryBtn.disabled = false;
+    secondaryBtn.disabled = false;
+  }
+
+  function openFixModal(target) {
+    hide();
+    selectedFix = target;
+    modalTitle.textContent = 'Fix data quality - ' + (target.getAttribute('data-dataset-name') || 'dataset');
+    modalMessage.textContent = target.getAttribute('data-message') || '';
+    primaryBtn.textContent = target.getAttribute('data-primary-label') || 'Apply fix';
+    secondaryBtn.textContent = target.getAttribute('data-secondary-label') || '';
+    secondaryBtn.style.display = target.getAttribute('data-secondary-action') ? '' : 'none';
+    modal.classList.add('show');
+  }
+
+  function refreshAnalytics() {
+    var form = document.getElementById('ds-refresh-form');
+    if (form) form.submit();
+    else window.location.reload();
+  }
+
+  function applyFix(action) {
+    if (!selectedFix) return;
+    primaryBtn.disabled = true;
+    secondaryBtn.disabled = true;
+    modalStatus.textContent = 'Applying fix...';
+
+    var body = new URLSearchParams();
+    body.set('dataset_id', selectedFix.getAttribute('data-dataset-id'));
+    body.set('issue', selectedFix.getAttribute('data-fix-issue'));
+    body.set('action', action);
+
+    fetch(fixUrl, {
+      method: 'POST',
+      headers: {'X-CSRFToken': csrfToken(), 'Content-Type': 'application/x-www-form-urlencoded'},
+      body: body.toString()
+    }).then(function (response) {
+      return response.json().then(function (data) {
+        if (!response.ok) throw new Error(data.error || 'Fix failed');
+        return data;
+      });
+    }).then(function () {
+      modalStatus.textContent = 'Fix applied. Reloading analytics...';
+      refreshAnalytics();
+    }).catch(function (err) {
+      modalStatus.textContent = err.message;
+      primaryBtn.disabled = false;
+      secondaryBtn.disabled = false;
+    });
+  }
+
   document.addEventListener('click', function (e) {
     var close = e.target.closest('.ds-pop-close');
     if (close) { hide(); return; }
+    var fix = e.target.closest('.ds-fix-trigger');
+    if (fix) {
+      e.preventDefault();
+      openFixModal(fix);
+      return;
+    }
     var target = e.target.closest('[data-info]');
     if (target) {
       e.preventDefault();
@@ -232,8 +340,19 @@
     if (!e.target.closest('#ds-popover')) hide();
   });
 
+  primaryBtn.addEventListener('click', function () {
+    if (selectedFix) applyFix(selectedFix.getAttribute('data-primary-action'));
+  });
+  secondaryBtn.addEventListener('click', function () {
+    if (selectedFix) applyFix(selectedFix.getAttribute('data-secondary-action'));
+  });
+  cancelBtn.addEventListener('click', closeFixModal);
+  modal.addEventListener('click', function (e) {
+    if (e.target === modal) closeFixModal();
+  });
+
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape') hide();
+    if (e.key === 'Escape') { hide(); closeFixModal(); }
   });
   window.addEventListener('resize', hide);
 })();

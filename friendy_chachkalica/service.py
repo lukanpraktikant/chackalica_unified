@@ -22,6 +22,7 @@ Endpoints:
     POST /pipeline            -> {pipeline_id, status, pid} (body: {pipeline_id, request_path})
     GET  /pipelines/{id}      -> {pipeline_id, status, returncode, started_at, finished_at, log_tail}
     POST /predict_image       -> {boxes, classes}          (synchronous 1-image inference; warm model)
+    POST /export_onnx         -> {onnx_path, meta_path}    (synchronous ONNX export of one checkpoint)
 
 Operational logging (what the service itself does — launches, stops, rejections,
 errors) is written under ``<repo_root>/logs/``, split three ways: ``train/`` (one
@@ -128,6 +129,11 @@ _jobs: dict[str, dict] = {}  # "train-{id}"/"eval-{id}" -> {proc, pid, started_a
 _predict_lock = threading.Lock()
 _predict_cache: dict = {}  # {key: {"kind", "obj", "info", "device"}}, size 1
 
+# ONNX export is CPU-only and stateless, but the RT-DETR exporter monkeypatches a
+# transformers class attribute for the duration of its trace — serialize exports
+# (and keep them off the predict path's toes) with a dedicated lock.
+_export_lock = threading.Lock()
+
 _service_log().info("service starting (max_concurrent=%s, logs=%s)", MAX_CONCURRENT, LOGS_DIR)
 
 
@@ -145,6 +151,13 @@ class EvalRequest(BaseModel):
 class PipelineRequest(BaseModel):
     pipeline_id: int
     request_path: str
+
+
+class ExportOnnxRequest(BaseModel):
+    """Export one ``.pt`` checkpoint to ``<onnx_path>`` + ``<onnx_path>.meta.json``."""
+
+    checkpoint_path: str
+    onnx_path: str
 
 
 class PredictImageRequest(BaseModel):
@@ -554,6 +567,39 @@ def predict_image(req: PredictImageRequest):
             raise HTTPException(status_code=500, detail=f"predict failed: {exc}")
 
     return {"boxes": boxes, "classes": entry["info"].get("train_classes", {})}
+
+
+@app.post("/export_onnx")
+def export_onnx(req: ExportOnnxRequest):
+    """Export a checkpoint to ONNX + meta.json synchronously.
+
+    Rebuilds the adapter from the ``.pt`` and dispatches to the arch's exporter
+    (see ``onnx_export/cli.py``), writing ``<onnx_path>`` and its sibling
+    ``.meta.json``. Runs on CPU — safe to call while the GPU is training.
+    """
+    log = _service_log()
+    checkpoint = Path(req.checkpoint_path)
+    if not checkpoint.exists():
+        log.error("export rejected: checkpoint not found: %s", checkpoint)
+        raise HTTPException(status_code=400, detail=f"checkpoint not found: {checkpoint}")
+
+    with _export_lock:
+        try:
+            from onnx_export.cli import export_checkpoint
+
+            onnx_path = export_checkpoint(req.checkpoint_path, req.onnx_path)
+        except HTTPException:
+            raise
+        except ValueError as exc:
+            log.warning("export rejected: %s", exc)
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:  # noqa: BLE001 - surface export failures to the caller
+            log.exception("export failed: %s", exc)
+            raise HTTPException(status_code=500, detail=f"export failed: {exc}")
+
+    meta_path = onnx_path.with_suffix(".meta.json")
+    log.info("exported %s -> %s", checkpoint, onnx_path)
+    return {"onnx_path": str(onnx_path), "meta_path": str(meta_path)}
 
 
 if __name__ == "__main__":

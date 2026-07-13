@@ -23,6 +23,7 @@ from django.utils.http import urlencode
 from fleet import jobs
 from fleet.models import Annotator, Dataset, FleetSettings, Project
 from fleet.services import analytics as analytics_svc
+from fleet.services import data_quality_solve
 from fleet.services import datasets as datasets_svc
 from fleet.services import lsapi
 from fleet.services import merge as merge_svc
@@ -395,6 +396,9 @@ class DatasetAdmin(admin.ModelAdmin):
             **self.admin_site.each_context(request),
             "title": "Dataset analytics",
             "reports": reports,
+            "selected": [str(report["dataset"].pk) for report in reports],
+            "action": "analyze_selected",
+            "action_checkbox_name": ACTION_CHECKBOX_NAME,
         }
         return TemplateResponse(request, "admin/fleet/dataset_analytics.html", context)
 
@@ -447,8 +451,27 @@ class DatasetAdmin(admin.ModelAdmin):
                  name="fleet_dataset_preview_image"),
             path("dataset-preview/data/", self.admin_site.admin_view(self.preview_data),
                  name="fleet_dataset_preview_data"),
+            path("dataset-quality/fix/", self.admin_site.admin_view(self.quality_fix),
+                 name="fleet_dataset_quality_fix"),
         ]
         return custom + super().get_urls()
+
+    def quality_fix(self, request):
+        """Apply one source-label quality repair from the analytics page."""
+        if request.method != "POST":
+            return JsonResponse({"error": "POST required"}, status=405)
+
+        dataset = Dataset.objects.filter(pk=request.POST.get("dataset_id")).first()
+        if dataset is None:
+            return JsonResponse({"error": "unknown dataset"}, status=400)
+
+        issue = request.POST.get("issue") or ""
+        action = request.POST.get("action") or None
+        try:
+            result = data_quality_solve.solve_dataset_quality(dataset, issue, action)
+        except (FileNotFoundError, RuntimeError, ValueError) as exc:
+            return JsonResponse({"error": str(exc)}, status=400)
+        return JsonResponse(result)
 
     def preview_view(self, request):
         """Render the viewer shell; the browser pulls images + labels per index."""

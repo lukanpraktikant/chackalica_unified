@@ -139,6 +139,12 @@ def _confusion_matrix(column) -> dict | None:
             ],
         })
 
+    # When the eval stored the re-thresholdable event histogram, hand it to the
+    # template so the page can rebuild the matrix client-side as the user drags a
+    # confidence slider. Older evals lack it and simply render the static matrix.
+    data = column["metrics"].get("confusion_matrix_data")
+    interactive = _confusion_data_for_slider(data) if isinstance(data, dict) else None
+
     return {
         "id": column["id"],
         "model": column["model"],
@@ -148,6 +154,40 @@ def _confusion_matrix(column) -> dict | None:
         "iou_threshold": _num(cm.get("iou_threshold")),
         "conf_threshold": _num(cm.get("conf_threshold")),
         "rows": rows,
+        "interactive": interactive,
+        # Pre-built DOM id for the json_script block; Django's ``add`` filter can't
+        # concatenate a string with the integer pk in the template.
+        "json_id": f"cmdata-{column['id']}",
+    }
+
+
+def _confusion_data_for_slider(data) -> dict | None:
+    """Validate and normalise a stored ``confusion_matrix_data`` event histogram.
+
+    Returns a JSON-serialisable dict the template embeds via ``json_script`` for the
+    client-side re-thresholding code, or None if the stored shape is unusable (so the
+    page falls back to the static matrix).
+    """
+    labels = data.get("labels")
+    matched = data.get("matched")
+    false_positives = data.get("false_positives")
+    misses = data.get("misses")
+    background = data.get("background_index")
+    if not isinstance(labels, list) or not isinstance(matched, list):
+        return None
+    if not isinstance(false_positives, list) or not isinstance(misses, list):
+        return None
+    if not isinstance(background, int):
+        background = len(labels)
+
+    floor = _num(data.get("floor"))
+    return {
+        "labels": [str(label) for label in labels],
+        "background_index": background,
+        "floor": floor if floor is not None else 0.01,
+        "matched": matched,
+        "false_positives": false_positives,
+        "misses": misses,
     }
 
 

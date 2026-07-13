@@ -741,7 +741,7 @@ def _apply_eval_nms(
     predictions: List[torch.Tensor],
     config: Optional[ExperimentConfig],
 ) -> List[torch.Tensor]:
-    threshold = 0.45 if config is None else config.evaluation.nms_threshold
+    threshold = None if config is None else config.evaluation.nms_threshold
     return [apply_class_aware_nms(prediction, threshold) for prediction in predictions]
 
 

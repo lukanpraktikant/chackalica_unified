@@ -126,3 +126,32 @@ def predict_image(payload: dict, ts: TrainingSettings | None = None) -> dict:
             f"trainer /predict_image returned HTTP {resp.status_code}: {detail}"
         )
     return resp.json()
+
+
+# ONNX export rebuilds the model and traces it — well past the short module
+# TIMEOUT, especially for the DETR-family archs.
+EXPORT_TIMEOUT = 600
+
+
+def export_onnx(checkpoint_path, onnx_path, ts: TrainingSettings | None = None) -> dict:
+    """Export one ``.pt`` to ``onnx_path`` + ``.meta.json`` via the trainer service.
+
+    Returns ``{"onnx_path", "meta_path"}`` (the paths the service actually wrote).
+    Synchronous: the service traces the model in its own torch env and returns
+    once the files are on the shared filesystem.
+    """
+    payload = {"checkpoint_path": str(checkpoint_path), "onnx_path": str(onnx_path)}
+    resp = requests.post(
+        f"{base_url(ts)}/export_onnx", json=payload, timeout=EXPORT_TIMEOUT)
+    if resp.status_code >= 400:
+        detail = resp.text
+        try:
+            body = resp.json()
+        except ValueError:
+            body = None
+        if isinstance(body, dict) and body.get("detail"):
+            detail = str(body["detail"])
+        raise RuntimeError(
+            f"trainer /export_onnx returned HTTP {resp.status_code}: {detail}"
+        )
+    return resp.json()

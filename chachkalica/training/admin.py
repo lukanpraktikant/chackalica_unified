@@ -8,6 +8,7 @@ ready-to-run config.
 """
 
 import json
+import re
 from pathlib import Path
 
 import django_rq
@@ -588,7 +589,7 @@ class TrainedModelAdmin(admin.ModelAdmin):
     list_display = ["name", "stage", "arch", "num_classes", "map50", "map50_95", "created_at"]
     list_filter = ["stage", "arch"]
     search_fields = ["name", "description"]
-    actions = ["evaluate", "preview_on_dataset", "view_hard_val_images"]
+    actions = ["evaluate", "preview_on_dataset", "export_onnx", "view_hard_val_images"]
     readonly_fields = ["source_run_result", "created_at", "updated_at"]
 
     @admin.display(description="mAP50")
@@ -774,6 +775,96 @@ class TrainedModelAdmin(admin.ModelAdmin):
             "action_checkbox_name": ACTION_CHECKBOX_NAME,
         }
         return TemplateResponse(request, "admin/training/preview_model.html", context)
+
+    # ------------------------------------------------------------------- ONNX export
+    def _export_checkpoints(self, model):
+        """(label, checkpoint_path) pairs for the model's best and last ``.pt``.
+
+        ``best`` comes from the source run result (falling back to the model's own
+        promoted ``checkpoint_path``); ``last`` only exists when a source run
+        result is present. Missing/blank paths are dropped.
+        """
+        run_result = model.source_run_result
+        best = ((getattr(run_result, "best_checkpoint", "") or "").strip()
+                if run_result else "")
+        best = best or (model.checkpoint_path or "").strip()
+        last = ((getattr(run_result, "last_checkpoint", "") or "").strip()
+                if run_result else "")
+
+        pairs = []
+        if best:
+            pairs.append(("best", best))
+        if last and last != best:
+            pairs.append(("last", last))
+        return pairs
+
+    @staticmethod
+    def _onnx_stem(model_name: str) -> str:
+        """Filesystem-safe basename for a model's exported artifacts."""
+        slug = re.sub(r"[^A-Za-z0-9._-]+", "_", model_name).strip("_")
+        return slug or "model"
+
+    @admin.action(description="Export best + last to ONNX…")
+    def export_onnx(self, request, queryset):
+        """Export a model's best and last ``.pt`` to ONNX under a chosen directory.
+
+        Drives the trainer service's synchronous ``/export_onnx`` (the export must
+        run in the trainer's torch env), writing ``<name>-best.onnx`` /
+        ``<name>-last.onnx`` (each with a sibling ``.meta.json``) into the operator's
+        directory. Relative paths resolve against the project root, like the other
+        training paths.
+        """
+        if queryset.count() != 1:
+            self.message_user(request, "Select exactly one model to export.",
+                              level=messages.WARNING)
+            return None
+        model = queryset.first()
+        checkpoints = self._export_checkpoints(model)
+        if not checkpoints:
+            self.message_user(
+                request, f"{model.name}: no checkpoint on record to export.",
+                level=messages.WARNING)
+            return None
+
+        if request.POST.get("apply"):
+            output_dir = (request.POST.get("output_dir") or "").strip()
+            if not output_dir:
+                self.message_user(request, "Enter an output directory.",
+                                  level=messages.WARNING)
+                return None
+            out_dir = config_gen._resolve(output_dir)
+            stem = self._onnx_stem(model.name)
+            exported = 0
+            for label, checkpoint in checkpoints:
+                onnx_path = out_dir / f"{stem}-{label}.onnx"
+                try:
+                    result = runner.export_onnx(checkpoint, onnx_path)
+                except Exception as exc:  # noqa: BLE001 - surface service/network errors
+                    self.message_user(
+                        request, f"{label} ({checkpoint}): {exc}", level=messages.ERROR)
+                    continue
+                exported += 1
+                self.message_user(
+                    request,
+                    f"Exported {label} → {result.get('onnx_path')} "
+                    f"(+ {Path(result.get('meta_path', '')).name}).")
+            if exported:
+                self.message_user(request, f"Exported {exported} checkpoint(s) for {model.name}.")
+            return None
+
+        ts = TrainingSettings.load()
+        default_dir = config_gen._resolve(ts.runs_root) / "onnx_exports"
+        context = {
+            **self.admin_site.each_context(request),
+            "title": f"Export {model.name} to ONNX",
+            "model": model,
+            "checkpoints": [{"label": label, "path": path} for label, path in checkpoints],
+            "default_output_dir": str(default_dir),
+            "action": "export_onnx",
+            "selected": [str(model.pk)],
+            "action_checkbox_name": ACTION_CHECKBOX_NAME,
+        }
+        return TemplateResponse(request, "admin/training/export_onnx.html", context)
 
     def get_urls(self):
         custom = [

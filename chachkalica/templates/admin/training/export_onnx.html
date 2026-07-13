@@ -1,0 +1,39 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+<p>Export model <strong>{{ model.name }}</strong> ({{ model.arch }}) to ONNX.</p>
+<p class="help">Each checkpoint below is written as
+<code>&lt;dir&gt;/{{ model.name }}-&lt;best|last&gt;.onnx</code> plus a sibling
+<code>.meta.json</code>. The export runs in the trainer service's torch environment,
+so the directory must be on the shared filesystem. Relative paths resolve against the
+project root.</p>
+
+<p>Checkpoints to export:</p>
+<ul>
+  {% for c in checkpoints %}
+    <li><strong>{{ c.label }}</strong> — <code>{{ c.path }}</code></li>
+  {% endfor %}
+</ul>
+
+<form action="" method="post">
+  {% csrf_token %}
+  {% for pk in selected %}
+    <input type="hidden" name="{{ action_checkbox_name }}" value="{{ pk }}">
+  {% endfor %}
+  <input type="hidden" name="action" value="{{ action }}">
+  <input type="hidden" name="apply" value="1">
+
+  <div class="form-row">
+    <label for="output_dir">Output directory:</label>
+    <input type="text" name="output_dir" id="output_dir" size="80"
+           value="{{ default_output_dir }}" required>
+    <p class="help">Directory the <code>.onnx</code> + <code>.meta.json</code> files
+    are written into (created if missing).</p>
+  </div>
+
+  <div class="submit-row">
+    <input type="submit" class="default" value="Export to ONNX">
+    <a href="../" class="button cancel-link">Cancel</a>
+  </div>
+</form>
+{% endblock %}

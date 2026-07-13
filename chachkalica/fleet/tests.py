@@ -2,11 +2,14 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
+from django.contrib.auth import get_user_model
 from django.test import TestCase
+from django.urls import reverse
 
 from fleet.models import Annotator, Dataset, FleetSettings, Project
 from fleet.reconcile import txt_format
 from fleet.services import analytics as analytics_svc
+from fleet.services import data_quality_solve
 from fleet.services import lsapi
 from fleet.services import merge as merge_svc
 
@@ -352,6 +355,119 @@ class DatasetAnalyticsTests(TestCase):
         by_name = {r["name"]: r for r in analytics_svc.analyze_dataset(ds)["rows"]}
         self.assertEqual(by_name["big"]["avg_size_pct"], 20.0)
         self.assertEqual(by_name["small"]["avg_size_pct"], 1.0)
+
+
+class DataQualitySolveTests(TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.src = Path(self.tmp.name)
+        fs = FleetSettings.load()
+        fs.source_dir = str(self.src)
+        fs.save()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _backup_files(self, dataset_name: str) -> list[Path]:
+        backup_root = self.src / dataset_name / "labels" / ".quality_fix_backups"
+        return sorted(path for path in backup_root.rglob("*.txt")) if backup_root.exists() else []
+
+    def test_clips_out_of_bounds_boxes_and_backs_up_file(self):
+        ds = _make_dataset(
+            self.src, "clip", "", ["cat"], ["a.jpg"],
+            labels={"a.txt": "0 0.95 0.5 0.2 0.2\n0 0.5 0.5 0.1 0.1\n"},
+        )
+
+        result = data_quality_solve.solve_dataset_quality(
+            ds, data_quality_solve.ISSUE_OUT_OF_BOUNDS_BOXES, data_quality_solve.ACTION_CLIP
+        )
+
+        self.assertEqual(result["changed_files"], 1)
+        self.assertEqual(result["clipped_regions"], 1)
+        self.assertEqual(result["backed_up_files"], 1)
+        self.assertEqual(
+            (self.src / "clip" / "labels" / "a.txt").read_text(encoding="utf-8"),
+            "0 0.925 0.5 0.15 0.2\n0 0.5 0.5 0.1 0.1\n",
+        )
+        self.assertEqual(analytics_svc.analyze_dataset(ds)["quality"]["out_of_bounds_boxes"], 0)
+        self.assertEqual(len(self._backup_files("clip")), 1)
+
+    def test_can_remove_out_of_bounds_boxes_instead_of_clipping(self):
+        ds = _make_dataset(
+            self.src, "remove_oob", "", ["cat"], ["a.jpg"],
+            labels={"a.txt": "0 0.95 0.5 0.2 0.2\n0 0.5 0.5 0.1 0.1\n"},
+        )
+
+        result = data_quality_solve.solve_dataset_quality(
+            ds, data_quality_solve.ISSUE_OUT_OF_BOUNDS_BOXES, data_quality_solve.ACTION_REMOVE
+        )
+
+        self.assertEqual(result["removed_regions"], 1)
+        self.assertEqual(
+            (self.src / "remove_oob" / "labels" / "a.txt").read_text(encoding="utf-8"),
+            "0 0.5 0.5 0.1 0.1\n",
+        )
+
+    def test_removes_invalid_class_regions_and_preserves_header(self):
+        ds = _make_dataset(
+            self.src, "invalid", "", ["cat"], ["a.jpg"],
+            labels={"a.txt": "640 480\n0 0.1 0.1 0.1 0.1\n9 0.2 0.2 0.1 0.1\n"},
+        )
+
+        result = data_quality_solve.solve_dataset_quality(ds, data_quality_solve.ISSUE_INVALID_CLASS_REGIONS)
+
+        self.assertEqual(result["removed_regions"], 1)
+        self.assertEqual(
+            (self.src / "invalid" / "labels" / "a.txt").read_text(encoding="utf-8"),
+            "640 480\n0 0.1 0.1 0.1 0.1\n",
+        )
+        self.assertEqual(analytics_svc.analyze_dataset(ds)["quality"]["invalid_class_regions"], 0)
+
+    def test_removes_zero_area_boxes_and_leaves_empty_label_file(self):
+        ds = _make_dataset(
+            self.src, "zero", "", ["cat"], ["a.jpg"],
+            labels={"a.txt": "640 480\n0 0.5 0.5 0 0.2\n"},
+        )
+
+        result = data_quality_solve.solve_dataset_quality(ds, data_quality_solve.ISSUE_ZERO_AREA_BOXES)
+
+        self.assertEqual(result["removed_regions"], 1)
+        self.assertEqual((self.src / "zero" / "labels" / "a.txt").read_text(encoding="utf-8"), "")
+        self.assertEqual(analytics_svc.analyze_dataset(ds)["quality"]["zero_area_boxes"], 0)
+
+    def test_deletes_orphan_label_files_after_backup(self):
+        ds = _make_dataset(
+            self.src, "orphans_fix", "", ["cat"], ["a.jpg"],
+            labels={"a.txt": "0 0.1 0.1 0.1 0.1\n", "ghost.txt": "0 0.2 0.2 0.1 0.1\n"},
+        )
+
+        result = data_quality_solve.solve_dataset_quality(ds, data_quality_solve.ISSUE_ORPHAN_LABEL_FILES)
+
+        self.assertEqual(result["deleted_files"], 1)
+        self.assertFalse((self.src / "orphans_fix" / "labels" / "ghost.txt").exists())
+        backups = self._backup_files("orphans_fix")
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].name, "ghost.txt")
+        self.assertEqual(analytics_svc.analyze_dataset(ds)["quality"]["orphan_label_files"], 0)
+
+    def test_admin_quality_fix_endpoint_applies_solver(self):
+        ds = _make_dataset(
+            self.src, "admin_fix", "", ["cat"], ["a.jpg"],
+            labels={"a.txt": "0 0.95 0.5 0.2 0.2\n"},
+        )
+        User = get_user_model()
+        User.objects.create_superuser(username="admin", email="admin@example.com", password="pw")
+        self.client.login(username="admin", password="pw")
+
+        response = self.client.post(reverse("admin:fleet_dataset_quality_fix"), {
+            "dataset_id": str(ds.pk),
+            "issue": data_quality_solve.ISSUE_OUT_OF_BOUNDS_BOXES,
+            "action": data_quality_solve.ACTION_CLIP,
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["clipped_regions"], 1)
+        self.assertEqual(analytics_svc.analyze_dataset(ds)["quality"]["out_of_bounds_boxes"], 0)
 
 
 class ImageSourceDirTests(TestCase):
