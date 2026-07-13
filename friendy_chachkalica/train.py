@@ -37,6 +37,24 @@ except ImportError:
     from registry import build_model
 
 
+def resolve_operating_nms_threshold(
+    config: ExperimentConfig,
+    model_config: Any,
+) -> Optional[float]:
+    """NMS IoU for the operating-point val/test metrics of one run.
+
+    A model entry's own ``nms_threshold`` param wins (for yolox that is also its
+    internal predict-time NMS, so re-applying it is a no-op; for the DETRs it
+    exists purely for this), falling back to the experiment-wide
+    ``evaluation.operating_nms_threshold``. None disables it — mAP is never
+    affected either way.
+    """
+    value = (getattr(model_config, "params", None) or {}).get("nms_threshold")
+    if value is None:
+        value = config.evaluation.operating_nms_threshold
+    return None if value is None else float(value)
+
+
 def _best_metric_name(config: ExperimentConfig) -> str:
     """Identifier of what best-checkpoint selection tracks, e.g. ``val_map50``
     or ``val_f1+map50`` (an average of both).
@@ -243,7 +261,11 @@ def train_model(
     start_epoch = 1
     best_metric_name = _best_metric_name(config)
     val_interval = config.training.val_interval
-    print(f"[train] Best-checkpoint selection metric: {best_metric_name} (val_interval={val_interval})")
+    operating_nms_threshold = resolve_operating_nms_threshold(config, model_config)
+    print(
+        f"[train] Best-checkpoint selection metric: {best_metric_name} "
+        f"(val_interval={val_interval} operating_nms_threshold={operating_nms_threshold})"
+    )
 
     last_checkpoint = run_dir / "last.pt"
     if resume and last_checkpoint.exists():
@@ -326,6 +348,7 @@ def train_model(
                     if run.val_dataset is not None
                     else train_dataset_config.classes
                 ),
+                operating_nms_threshold=operating_nms_threshold,
             )
 
         if scheduler is not None:
@@ -420,6 +443,7 @@ def train_model(
             prediction_classes=train_dataset_config.classes,
             target_classes=run.test_dataset.classes if run.test_dataset is not None else None,
             eval_classes=run.test_dataset.classes if run.test_dataset is not None else None,
+            operating_nms_threshold=operating_nms_threshold,
         )
     else:
         prediction_path = None
@@ -535,6 +559,7 @@ def evaluate_map(
     hard_images_path: Optional[str | Path] = None,
     prediction_classes: Optional[Dict[int, str]] = None,
     target_classes: Optional[Dict[int, str]] = None,
+    operating_nms_threshold: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Predict over a loader and compute detection metrics.
 
@@ -578,6 +603,7 @@ def evaluate_map(
         prediction_classes=prediction_classes,
         target_classes=target_classes,
         eval_classes=target_classes,
+        operating_nms_threshold=operating_nms_threshold,
     )
     _print_eval_map_debug(
         metrics,
@@ -611,6 +637,7 @@ def predict_dataset(
     prediction_classes: Optional[Dict[int, str]] = None,
     target_classes: Optional[Dict[int, str]] = None,
     eval_classes: Optional[Dict[int, str]] = None,
+    operating_nms_threshold: Optional[float] = None,
 ) -> Dict[str, Any]:
     adapter.eval()
     records = []
@@ -650,6 +677,7 @@ def predict_dataset(
         prediction_classes=prediction_classes,
         target_classes=target_classes,
         eval_classes=eval_classes,
+        operating_nms_threshold=operating_nms_threshold,
     )
     # Stamp the run with wall-clock timing so downstream tooling can show when the
     # eval ran and how long it took, alongside the quality metrics.

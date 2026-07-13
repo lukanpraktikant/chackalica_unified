@@ -123,7 +123,8 @@ class ExperimentAdmin(admin.ModelAdmin):
         ),
         (
             "Evaluation",
-            {"fields": ["eval_batch_size", "eval_num_workers", "eval_score_threshold", "iou_thresholds"]},
+            {"fields": ["eval_batch_size", "eval_num_workers", "eval_score_threshold",
+                        "eval_operating_nms_threshold", "iou_thresholds"]},
         ),
     ]
 

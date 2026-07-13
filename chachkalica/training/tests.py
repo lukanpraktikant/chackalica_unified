@@ -210,6 +210,15 @@ class ConfigGenTests(TestCase):
         self.assertEqual(data["training"]["best_metric"], ["f1", "map50"])
         self.assertEqual(data["training"]["val_interval"], 5)
 
+    def test_operating_nms_threshold_flows_into_evaluation_dict(self):
+        data = config_gen.build_experiment_dict(self.exp, "/out/exp1")
+        self.assertIsNone(data["evaluation"]["operating_nms_threshold"])  # default off
+
+        self.exp.eval_operating_nms_threshold = 0.7
+        self.exp.save()
+        data = config_gen.build_experiment_dict(self.exp, "/out/exp1")
+        self.assertEqual(data["evaluation"]["operating_nms_threshold"], 0.7)
+
     def test_early_stopping_patience_flows_into_training_dict(self):
         self.exp.early_stopping_patience = 10
         self.exp.save()

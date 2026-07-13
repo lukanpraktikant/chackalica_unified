@@ -3,6 +3,11 @@ from typing import Any, Dict, Iterable, Optional, Sequence
 
 import torch
 
+try:
+    from .postprocess import class_aware_nms_keep
+except ImportError:
+    from postprocess import class_aware_nms_keep
+
 
 DEFAULT_IOU_THRESHOLDS = [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95]
 
@@ -17,6 +22,7 @@ def evaluate_detection(
     prediction_classes: Optional[Dict[int, str]] = None,
     target_classes: Optional[Dict[int, str]] = None,
     eval_classes: Optional[Dict[int, str]] = None,
+    operating_nms_threshold: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Evaluate Friendy-format detection predictions against target dicts.
 
@@ -24,6 +30,14 @@ def evaluate_detection(
     name into that evaluation class space. Classes absent from eval_classes are
     ignored, which lets a model trained on extra classes be compared on only the
     classes present in the validation or test dataset.
+
+    ``operating_nms_threshold`` applies class-aware NMS to the predictions used
+    for the operating-point metrics only (micro and per-class precision/recall/
+    F1, prediction counts, confusion matrix) — mirroring deployed inference,
+    which thresholds then NMS-es. AP/mAP always use the raw NMS-free set, so
+    NMS-free architectures (DETRs) keep their standard mAP. Suppression flows
+    strictly downward in confidence, so applying NMS before a score cut equals
+    cutting first and NMS-ing the survivors.
     """
     thresholds = [float(value) for value in (iou_thresholds or DEFAULT_IOU_THRESHOLDS)]
     if not thresholds:
@@ -65,6 +79,17 @@ def evaluate_detection(
             eval_classes=effective_eval_classes,
         )
 
+    # The operating-point metrics see the NMS-suppressed set when configured;
+    # AP/mAP below always use the raw prepared_predictions. With no operating
+    # NMS both sets are the same objects, keeping the single-pass behavior.
+    if operating_nms_threshold is not None:
+        operating_predictions = [
+            _apply_operating_nms(prediction, operating_nms_threshold)
+            for prediction in prepared_predictions
+        ]
+    else:
+        operating_predictions = prepared_predictions
+
     ap_by_threshold = {}
     precision_by_class = {}
     recall_by_class = {}
@@ -77,7 +102,7 @@ def evaluate_detection(
 
     operating_prediction_count = 0
     operating_pred_count_by_class = {class_id: 0 for class_id in class_ids}
-    for prediction in prepared_predictions:
+    for prediction in operating_predictions:
         keep = prediction['scores'] >= operating_threshold
         operating_prediction_count += int(keep.sum())
         for class_id in class_ids:
@@ -89,7 +114,7 @@ def evaluate_detection(
     # Precision/recall/F1 and the confusion matrix are single operating-point
     # metrics, so they use score_threshold instead.
     micro = _micro_stats(
-        prepared_predictions,
+        operating_predictions,
         prepared_targets,
         iou_threshold=0.5,
         score_cut=operating_threshold,
@@ -106,6 +131,17 @@ def evaluate_detection(
         )
         gt_count_by_class[class_id] = precomputed['gt_count']
         pred_count_by_class[class_id] = operating_pred_count_by_class.get(class_id, 0)
+        # Per-class P/R/F1 are operating-point metrics: when operating NMS is
+        # on they need their own matching pass over the suppressed set. AP
+        # always comes from the raw-set `precomputed`.
+        if operating_predictions is prepared_predictions:
+            operating_precomputed = precomputed
+        else:
+            operating_precomputed = _precompute_class_matching(
+                operating_predictions,
+                prepared_targets,
+                class_id=class_id,
+            )
         for threshold in thresholds:
             stats = _class_stats_at_iou(
                 precomputed,
@@ -114,9 +150,19 @@ def evaluate_detection(
             )
             ap_by_threshold[threshold][class_id] = stats['ap']
             if threshold == 0.5:
-                precision_by_class[class_id] = stats['precision']
-                recall_by_class[class_id] = stats['recall']
-                f1_by_class[class_id] = _f1(stats['precision'], stats['recall'])
+                if operating_precomputed is precomputed:
+                    operating_stats = stats
+                else:
+                    operating_stats = _class_stats_at_iou(
+                        operating_precomputed,
+                        iou_threshold=threshold,
+                        score_cut=operating_threshold,
+                    )
+                precision_by_class[class_id] = operating_stats['precision']
+                recall_by_class[class_id] = operating_stats['recall']
+                f1_by_class[class_id] = _f1(
+                    operating_stats['precision'], operating_stats['recall']
+                )
 
     ap50_by_class = ap_by_threshold.get(0.5, {})
     ap5095_by_class = {
@@ -154,6 +200,15 @@ def evaluate_detection(
                 _remap_prediction(prediction, prediction_id_to_name, eval_name_to_id)
                 for prediction in floor_predictions
             ]
+    # The confusion matrix is an operating-point view, so it gets the same NMS.
+    # Applying it at the floor keeps the interactive re-thresholding exact: a
+    # suppressor always outscores its victim, so NMS-at-floor + cut-at-T equals
+    # cut-at-T + NMS for every T >= floor.
+    if operating_nms_threshold is not None:
+        floor_predictions = [
+            _apply_operating_nms(prediction, operating_nms_threshold)
+            for prediction in floor_predictions
+        ]
     confusion_data = _confusion_matrix_data(
         floor_predictions,
         prepared_targets,
@@ -171,6 +226,7 @@ def evaluate_detection(
         'recall': micro['recall'],
         'f1': micro['f1'],
         'f1_confidence': micro['f1_confidence'],
+        'operating_nms_threshold': operating_nms_threshold,
         'num_eval_classes': len(class_ids),
         'num_eval_classes_with_gt': len(classes_with_gt),
         'num_images': len(targets),
@@ -380,6 +436,26 @@ def _empty_prediction() -> Dict[str, torch.Tensor]:
         'boxes': torch.empty((0, 4), dtype=torch.float32),
         'scores': torch.empty((0,), dtype=torch.float32),
         'labels': torch.empty((0,), dtype=torch.long),
+    }
+
+
+def _apply_operating_nms(
+    prediction: Dict[str, torch.Tensor],
+    iou_threshold: float,
+) -> Dict[str, torch.Tensor]:
+    """Class-aware NMS on one prepared prediction dict, preserving order."""
+    if prediction['scores'].numel() == 0:
+        return prediction
+    keep = class_aware_nms_keep(
+        prediction['boxes'],
+        prediction['scores'],
+        prediction['labels'],
+        iou_threshold,
+    )
+    return {
+        'boxes': prediction['boxes'][keep],
+        'scores': prediction['scores'][keep],
+        'labels': prediction['labels'][keep],
     }
 
 

@@ -153,7 +153,20 @@ class Experiment(models.Model):
     # --- evaluation ---
     eval_batch_size = models.PositiveIntegerField(default=4)
     eval_num_workers = models.PositiveIntegerField(default=4)
-    eval_score_threshold = models.FloatField(default=0.001)
+    eval_score_threshold = models.FloatField(
+        default=0.25,
+        help_text="Operating-point confidence threshold used for precision, recall, and F1 "
+                  "during per-epoch validation. map50/map50_95 are unaffected — they're always "
+                  "computed at a fixed low threshold (0.001) so mAP can sweep the full "
+                  "precision-recall curve.",
+    )
+    eval_operating_nms_threshold = models.FloatField(
+        null=True, blank=True,
+        help_text="Class-aware NMS IoU applied to val/test precision/recall/F1 and the "
+                  "confusion matrix only — mAP always stays NMS-free. Dedupes the NMS-free "
+                  "DETR models; effectively a no-op for YOLOX (its predictions are already "
+                  "NMS'd at 0.45). A model's own NMS threshold overrides this. Blank = off.",
+    )
     iou_thresholds = models.JSONField(default=default_iou_thresholds, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)

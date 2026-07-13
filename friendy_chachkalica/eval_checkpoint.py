@@ -35,7 +35,7 @@ try:
     from .data import build_eval_dataloader
     from .device import resolve_device
     from .registry import build_model
-    from .train import predict_dataset
+    from .train import predict_dataset, resolve_operating_nms_threshold
     from .val import _to_builtin, _write_yaml
 except ImportError:
     from config import (
@@ -48,7 +48,7 @@ except ImportError:
     from data import build_eval_dataloader
     from device import resolve_device
     from registry import build_model
-    from train import predict_dataset
+    from train import predict_dataset, resolve_operating_nms_threshold
     from val import _to_builtin, _write_yaml
 
 
@@ -69,6 +69,7 @@ def eval_checkpoint(
     score_threshold: float = 0.001,
     map_score_threshold: Optional[float] = None,
     nms_threshold: Optional[float] = None,
+    operating_nms_threshold: Optional[float] = None,
     iou_thresholds: Optional[List[float]] = None,
     batch_size: int = 4,
     num_workers: int = 4,
@@ -111,6 +112,7 @@ def eval_checkpoint(
         score_threshold=score_threshold,
         map_score_threshold=map_score_threshold,
         nms_threshold=nms_threshold,
+        operating_nms_threshold=operating_nms_threshold,
         iou_thresholds=iou_thresholds or EvaluationConfig().iou_thresholds,
     )
     training = TrainingConfig(batch_size=batch_size, num_workers=num_workers, device=device)
@@ -129,6 +131,7 @@ def eval_checkpoint(
         prediction_classes=train_classes,
         target_classes=eval_classes,
         eval_classes=eval_classes,
+        operating_nms_threshold=resolve_operating_nms_threshold(config, config.models[0]),
     )
 
     result = {
@@ -158,6 +161,7 @@ def eval_from_request(request_path: Union[str, Path]) -> Dict[str, Any]:
         score_threshold=request.get("score_threshold", 0.001),
         map_score_threshold=request.get("map_score_threshold"),
         nms_threshold=request.get("nms_threshold"),
+        operating_nms_threshold=request.get("operating_nms_threshold"),
         iou_thresholds=request.get("iou_thresholds"),
         batch_size=request.get("batch_size", 4),
         num_workers=request.get("num_workers", 4),

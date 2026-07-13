@@ -25,6 +25,22 @@ def apply_class_aware_nms(
     return prediction[keep]
 
 
+def class_aware_nms_keep(
+    boxes: torch.Tensor,
+    scores: torch.Tensor,
+    labels: torch.Tensor,
+    iou_threshold: float,
+) -> torch.Tensor:
+    """Keep-indices of class-aware NMS over xyxy boxes.
+
+    Used by metrics to suppress duplicates at the operating point without going
+    through the Friendy (N, 6) tensor format. Indices are returned sorted
+    ascending so indexing with them preserves the caller's ordering.
+    """
+    keep = _batched_nms(boxes, scores, labels, float(iou_threshold))
+    return torch.sort(keep).values
+
+
 def _xywhn_to_xyxy(boxes: torch.Tensor) -> torch.Tensor:
     if boxes.numel() == 0:
         return boxes.reshape(-1, 4)

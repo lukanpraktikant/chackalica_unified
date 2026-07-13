@@ -64,7 +64,14 @@ class EvaluationConfig:
     num_workers: Optional[int] = None
     score_threshold: float = 0.001
     map_score_threshold: Optional[float] = None
+    # Legacy global NMS applied to ALL predictions before ANY metric — this
+    # prunes the low-confidence tail mAP integrates over, so prefer
+    # operating_nms_threshold below and leave this null.
     nms_threshold: Optional[float] = None
+    # Class-aware NMS IoU applied ONLY to the operating-point metrics
+    # (precision/recall/F1, per-class, confusion matrix). mAP stays NMS-free.
+    # A model entry's own nms_threshold param overrides this per run.
+    operating_nms_threshold: Optional[float] = None
     iou_thresholds: List[float] = field(
         default_factory=lambda: [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95]
     )
@@ -495,6 +502,13 @@ def _parse_evaluation(value: Any) -> EvaluationConfig:
     if nms_threshold is not None and (nms_threshold <= 0 or nms_threshold > 1):
         raise ValueError("evaluation.nms_threshold must be in (0, 1] or null")
 
+    raw_operating_nms = value.get("operating_nms_threshold")
+    operating_nms_threshold = None if raw_operating_nms is None else float(raw_operating_nms)
+    if operating_nms_threshold is not None and (
+        operating_nms_threshold <= 0 or operating_nms_threshold > 1
+    ):
+        raise ValueError("evaluation.operating_nms_threshold must be in (0, 1] or null")
+
     iou_thresholds = value.get(
         "iou_thresholds",
         [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95],
@@ -512,6 +526,7 @@ def _parse_evaluation(value: Any) -> EvaluationConfig:
         score_threshold=score_threshold,
         map_score_threshold=map_score_threshold,
         nms_threshold=nms_threshold,
+        operating_nms_threshold=operating_nms_threshold,
         iou_thresholds=iou_thresholds,
     )
 

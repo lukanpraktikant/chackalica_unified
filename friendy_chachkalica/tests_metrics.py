@@ -85,5 +85,82 @@ class EvaluateDetectionConfusionMatrixTests(unittest.TestCase):
         )
 
 
+class EvaluateDetectionOperatingNMSTests(unittest.TestCase):
+    """operating_nms_threshold dedupes the operating-point metrics; mAP never changes."""
+
+    def _target(self):
+        return {
+            "orig_size": torch.tensor([100, 100]),
+            "boxes": torch.tensor([[40.0, 40.0, 60.0, 60.0]]),
+            "labels": torch.tensor([0]),
+        }
+
+    def _duplicate_predictions(self):
+        # Two near-identical confident boxes on one object (a DETR duplicate,
+        # IoU ~0.91) — without NMS the second is a guaranteed false positive.
+        return torch.tensor([
+            [0.50, 0.50, 0.20, 0.20, 0.90, 0.0],
+            [0.50, 0.50, 0.21, 0.21, 0.80, 0.0],
+        ])
+
+    def _evaluate(self, **overrides):
+        kwargs = dict(
+            iou_thresholds=[0.5],
+            map_score_threshold=0.01,
+            score_threshold=0.5,
+            num_classes=1,
+        )
+        kwargs.update(overrides)
+        return evaluate_detection(
+            [self._duplicate_predictions()], [self._target()], **kwargs
+        )
+
+    def test_duplicate_counts_as_fp_without_operating_nms(self):
+        metrics = self._evaluate()
+        self.assertEqual(metrics["num_predictions"], 2)
+        self.assertEqual(metrics["precision"], 0.5)
+        self.assertEqual(metrics["recall"], 1.0)
+        self.assertEqual(metrics["per_class"][0]["precision"], 0.5)
+        self.assertIsNone(metrics["operating_nms_threshold"])
+
+    def test_operating_nms_dedupes_all_operating_metrics_but_not_map(self):
+        base = self._evaluate()
+        nms = self._evaluate(operating_nms_threshold=0.5)
+
+        self.assertEqual(nms["num_predictions"], 1)
+        self.assertEqual(nms["precision"], 1.0)
+        self.assertEqual(nms["recall"], 1.0)
+        self.assertEqual(nms["per_class"][0]["precision"], 1.0)
+        self.assertEqual(nms["per_class"][0]["prediction_count"], 1)
+        self.assertEqual(nms["operating_nms_threshold"], 0.5)
+        # The duplicate FP disappears from the confusion matrix's background row.
+        self.assertEqual(base["confusion_matrix"]["matrix"], [[1, 0], [1, 0]])
+        self.assertEqual(nms["confusion_matrix"]["matrix"], [[1, 0], [0, 0]])
+        # mAP integrates the raw NMS-free ranking either way.
+        self.assertEqual(base["map50"], nms["map50"])
+        self.assertEqual(base["map50_95"], nms["map50_95"])
+
+    def test_operating_nms_keeps_separate_objects(self):
+        # Two confident boxes on two disjoint ground truths must both survive.
+        target = {
+            "orig_size": torch.tensor([100, 100]),
+            "boxes": torch.tensor([[10.0, 10.0, 30.0, 30.0], [60.0, 60.0, 80.0, 80.0]]),
+            "labels": torch.tensor([0, 0]),
+        }
+        prediction = torch.tensor([
+            [0.20, 0.20, 0.20, 0.20, 0.90, 0.0],
+            [0.70, 0.70, 0.20, 0.20, 0.80, 0.0],
+        ])
+        metrics = evaluate_detection(
+            [prediction], [target],
+            iou_thresholds=[0.5], map_score_threshold=0.01,
+            score_threshold=0.5, num_classes=1,
+            operating_nms_threshold=0.5,
+        )
+        self.assertEqual(metrics["num_predictions"], 2)
+        self.assertEqual(metrics["precision"], 1.0)
+        self.assertEqual(metrics["recall"], 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -19,6 +19,10 @@ class RTDETRAdapter:
     image_processor: Any
     num_classes: int
     score_threshold: float = 0.5
+    # NOT applied in predict() — DETRs are set-based and run NMS-free. The
+    # trainer reads this as the IoU for the operating-point val/test metrics
+    # (precision/recall/F1/confusion); see train.resolve_operating_nms_threshold.
+    nms_threshold: Optional[float] = None
     image_mean: tuple = (0.485, 0.456, 0.406)
     image_std: tuple = (0.229, 0.224, 0.225)
     input_max_size: Optional[int] = 640
@@ -184,6 +188,7 @@ def build_rtdetr(
     num_classes: int,
     weights: Optional[str] = None,
     score_threshold: float = 0.5,
+    nms_threshold: Optional[float] = None,
     image_mean: tuple = (0.485, 0.456, 0.406),
     image_std: tuple = (0.229, 0.224, 0.225),
     input_max_size: Optional[int] = 640,
@@ -250,6 +255,7 @@ def build_rtdetr(
         image_processor=RTDetrImageProcessor(),
         num_classes=num_classes,
         score_threshold=score_threshold,
+        nms_threshold=nms_threshold,
         image_mean=image_mean,
         image_std=image_std,
         input_max_size=input_max_size,

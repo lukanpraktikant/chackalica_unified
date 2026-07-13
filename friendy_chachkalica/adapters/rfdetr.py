@@ -44,6 +44,10 @@ class RFDETRAdapter:
     num_classes: int
     resolution: int = 560
     score_threshold: float = 0.5
+    # NOT applied in predict() — DETRs are set-based and run NMS-free. The
+    # trainer reads this as the IoU for the operating-point val/test metrics
+    # (precision/recall/F1/confusion); see train.resolve_operating_nms_threshold.
+    nms_threshold: Optional[float] = None
     image_mean: tuple = (0.485, 0.456, 0.406)
     image_std: tuple = (0.229, 0.224, 0.225)
     name: str = "rfdetr"
@@ -163,6 +167,7 @@ def build_rfdetr(
     variant: str = DEFAULT_RFDETR_VARIANT,
     weights: Any = True,
     score_threshold: float = 0.5,
+    nms_threshold: Optional[float] = None,
     resolution: Optional[int] = None,
     **config_kwargs: Any,
 ) -> RFDETRAdapter:
@@ -177,6 +182,9 @@ def build_rfdetr(
             Apache weights for fine-tuning; a string is treated as an explicit
             checkpoint path; ``False``/``None`` trains from scratch.
         score_threshold: Default confidence cutoff used by :meth:`RFDETRAdapter.predict`.
+        nms_threshold: IoU the trainer uses to NMS this model's predictions for
+            the operating-point val/test metrics only. Never applied inside
+            ``predict`` (DETR inference stays NMS-free) and never affects mAP.
         resolution: Optional square input resolution override; defaults to the
             variant's native resolution.
         **config_kwargs: Extra RF-DETR ModelConfig kwargs.
@@ -236,6 +244,7 @@ def build_rfdetr(
         num_classes=num_classes,
         resolution=int(model_config.resolution),
         score_threshold=score_threshold,
+        nms_threshold=nms_threshold,
         image_mean=tuple(wrapper.means),
         image_std=tuple(wrapper.stds),
     )

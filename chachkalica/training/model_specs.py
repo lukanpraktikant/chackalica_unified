@@ -89,6 +89,12 @@ ARCH_FIELD_SPECS: dict[str, list[dict]] = {
             "default": 0.5,
             "help": "Default confidence cutoff used at prediction time.",
         },
+        {
+            "key": "nms_threshold", "label": "Val-metrics NMS threshold", "kind": "float",
+            "help": "IoU for deduplicating this model's boxes in val/test "
+                    "precision/recall/F1 only — inference stays NMS-free and mAP is "
+                    "unaffected. Blank = the experiment's operating NMS threshold.",
+        },
     ],
     "rtdetr": [
         {
@@ -101,6 +107,12 @@ ARCH_FIELD_SPECS: dict[str, list[dict]] = {
         {
             "key": "score_threshold", "label": "Score threshold", "kind": "float",
             "default": 0.5, "help": "Default confidence cutoff used at prediction time.",
+        },
+        {
+            "key": "nms_threshold", "label": "Val-metrics NMS threshold", "kind": "float",
+            "help": "IoU for deduplicating this model's boxes in val/test "
+                    "precision/recall/F1 only — inference stays NMS-free and mAP is "
+                    "unaffected. Blank = the experiment's operating NMS threshold.",
         },
         {
             "key": "input_max_size", "label": "Input max size", "kind": "int",

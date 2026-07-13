@@ -11,13 +11,13 @@ try:
     from .data import build_eval_dataloader
     from .device import resolve_device
     from .registry import build_model
-    from .train import predict_dataset
+    from .train import predict_dataset, resolve_operating_nms_threshold
 except ImportError:
     from config import DatasetConfig, ExperimentConfig, ExperimentRun, build_experiment_runs, load_config
     from data import build_eval_dataloader
     from device import resolve_device
     from registry import build_model
-    from train import predict_dataset
+    from train import predict_dataset, resolve_operating_nms_threshold
 
 
 def val_from_config(
@@ -121,6 +121,7 @@ def evaluate_run(
         prediction_classes=run.train_dataset.classes,
         target_classes=dataset_config.classes,
         eval_classes=dataset_config.classes,
+        operating_nms_threshold=resolve_operating_nms_threshold(config, run.model),
     )
 
     result = {

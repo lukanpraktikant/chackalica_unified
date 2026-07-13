@@ -183,8 +183,14 @@ def build_experiment_dict(experiment: Experiment, output_dir: Path | str) -> dic
         "evaluation": {
             "batch_size": experiment.eval_batch_size,
             "num_workers": experiment.eval_num_workers,
+            # Fixed low so map50/map50_95 sweep the full precision-recall curve;
+            # eval_score_threshold is the separate, user-set operating point for
+            # precision/recall/f1 (see Experiment.eval_score_threshold help text).
             "map_score_threshold": 0.001,
             "score_threshold": experiment.eval_score_threshold,
+            # NMS for the operating-point metrics only (mAP stays NMS-free); a
+            # model entry's own nms_threshold param overrides it per run.
+            "operating_nms_threshold": experiment.eval_operating_nms_threshold,
             "iou_thresholds": experiment.iou_thresholds,
         },
     }
