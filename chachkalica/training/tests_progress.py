@@ -50,6 +50,22 @@ class ProgressTests(TestCase):
         self.assertIn("lr=1.00e-04", line)
         self.assertIn("best", line)
 
+    def test_epoch_line_shows_custom_best_metric(self):
+        line = progress.epoch_line(
+            {"epoch": 4, "train": {"loss": 0.2}, "val": {"loss": 0.3},
+             "val_map": {"map50": 0.7, "f1": 0.5}, "best_metric": "val_f1+map50",
+             "best_metric_score": 0.6, "lr": 1e-4, "is_best": False}
+        )
+        self.assertIn("val_f1+map50=0.6000", line)
+
+    def test_epoch_line_hides_default_best_metric(self):
+        line = progress.epoch_line(
+            {"epoch": 4, "train": {"loss": 0.2}, "val": {"loss": 0.3},
+             "val_map": {"map50": 0.7}, "best_metric": "val_map50",
+             "best_metric_score": 0.7, "lr": 1e-4, "is_best": False}
+        )
+        self.assertEqual(line.count("val_map50="), 1)
+
     def test_epoch_line_handles_missing_val(self):
         line = progress.epoch_line({"epoch": 1, "train": {"loss": 0.5}, "val": None, "lr": None})
         self.assertIn("val_loss=—", line)

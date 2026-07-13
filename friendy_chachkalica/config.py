@@ -49,6 +49,11 @@ class TrainingConfig:
     amp: bool = False
     gradient_clip_norm: Optional[float] = None
     early_stopping_patience: Optional[int] = None
+    # Val metric(s) that select best.pt (see BEST_METRIC_CHOICES). More than
+    # one entry means their average is tracked, e.g. ("f1", "map50").
+    best_metric: tuple = ("map50",)
+    # Run validation every N epochs (the final epoch always validates).
+    val_interval: int = 1
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
 
@@ -231,6 +236,11 @@ def _parse_dataset(value: Any, base_dir: Path, field_name: str, role: str) -> Da
 
 AUGMENTATION_KEYS = ("hflip", "scale_crop")
 
+# Keys of the per-epoch val mAP summary that training.best_metric may name.
+# All are higher-is-better; precision/recall/f1 are computed at the operating
+# score threshold, not at each class's best confidence.
+BEST_METRIC_CHOICES = ("map50", "map50_95", "precision", "recall", "f1")
+
 
 def _parse_augmentation(value: Any, field_name: str, role: str) -> Dict[str, float]:
     """Validate a dataset's optional ``augmentation`` mapping.
@@ -356,6 +366,12 @@ def _parse_training(value: Any) -> TrainingConfig:
     if seed is not None:
         seed = int(seed)
 
+    best_metric = _parse_best_metric(value.get("best_metric"))
+
+    val_interval = int(value.get("val_interval", 1))
+    if val_interval <= 0:
+        raise ValueError("training.val_interval must be greater than 0")
+
     return TrainingConfig(
         epochs=epochs,
         batch_size=batch_size,
@@ -365,9 +381,33 @@ def _parse_training(value: Any) -> TrainingConfig:
         amp=bool(value.get("amp", False)),
         gradient_clip_norm=gradient_clip_norm,
         early_stopping_patience=early_stopping_patience,
+        best_metric=best_metric,
+        val_interval=val_interval,
         optimizer=optimizer,
         scheduler=scheduler,
     )
+
+
+def _parse_best_metric(value: Any) -> tuple:
+    """training.best_metric: one metric name or a list whose average is tracked."""
+    if value is None:
+        return ("map50",)
+
+    entries = value if isinstance(value, list) else [value]
+    if not entries:
+        raise ValueError("training.best_metric must name at least one metric")
+
+    metrics: List[str] = []
+    for entry in entries:
+        metric = str(entry).lower()
+        if metric not in BEST_METRIC_CHOICES:
+            raise ValueError(
+                f"training.best_metric {entry!r} is not a known val metric "
+                f"(supported: {', '.join(BEST_METRIC_CHOICES)})"
+            )
+        if metric not in metrics:
+            metrics.append(metric)
+    return tuple(metrics)
 
 
 def _parse_optimizer(value: Any) -> OptimizerConfig:

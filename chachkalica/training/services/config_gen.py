@@ -168,6 +168,10 @@ def build_experiment_dict(experiment: Experiment, output_dir: Path | str) -> dic
             "amp": experiment.amp,
             "gradient_clip_norm": experiment.gradient_clip_norm,
             "early_stopping_patience": experiment.early_stopping_patience,
+            # "f1+map50" is one choice value meaning "average of both"; the
+            # trainer takes a list and tracks the mean.
+            "best_metric": experiment.best_metric.split("+"),
+            "val_interval": experiment.val_interval,
             "optimizer": {
                 "name": experiment.optimizer_name,
                 "lr": experiment.lr,

@@ -76,8 +76,14 @@ def epoch_line(epoch: dict) -> str:
         f"train_loss={_fmt(train.get('loss'))}",
         f"val_loss={_fmt(val.get('loss'))}",
         f"val_map50={_fmt(val_map.get('map50'))}",
-        f"lr={lr:.2e}" if isinstance(lr, (int, float)) else "lr=—",
     ]
+    # Runs configured with training.best_metric stamp each epoch with the
+    # metric checkpoint selection tracked (e.g. val_f1+map50); show its score
+    # unless it's plain val_map50, which the line already carries.
+    best_metric = epoch.get("best_metric")
+    if best_metric and best_metric != "val_map50":
+        parts.append(f"{best_metric}={_fmt(epoch.get('best_metric_score'))}")
+    parts.append(f"lr={lr:.2e}" if isinstance(lr, (int, float)) else "lr=—")
     if epoch.get("is_best"):
         parts.append("★ best")
     return "   ".join(parts)

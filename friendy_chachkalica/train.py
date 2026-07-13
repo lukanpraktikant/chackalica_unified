@@ -37,10 +37,29 @@ except ImportError:
     from registry import build_model
 
 
-# What best-checkpoint selection tracks; stamped into checkpoints so a resume
-# can tell whether a stored best_score is comparable (older checkpoints tracked
-# val loss, where lower was better, or val mAP50-95).
-BEST_METRIC = "val_map50"
+def _best_metric_name(config: ExperimentConfig) -> str:
+    """Identifier of what best-checkpoint selection tracks, e.g. ``val_map50``
+    or ``val_f1+map50`` (an average of both).
+
+    Stamped into checkpoints so a resume can tell whether a stored best_score
+    is comparable (older checkpoints tracked val loss, where lower was better,
+    or a different metric selection).
+    """
+    return "val_" + "+".join(config.training.best_metric)
+
+
+def _best_metric_score(
+    config: ExperimentConfig,
+    val_map_summary: Optional[Dict[str, Any]],
+) -> Optional[float]:
+    """The configured selection score for one epoch: the named val metric, or
+    the mean when several are configured. All choices are higher-is-better."""
+    if val_map_summary is None:
+        return None
+    values = [val_map_summary.get(metric) for metric in config.training.best_metric]
+    if any(value is None for value in values):
+        return None
+    return float(sum(values)) / len(values)
 
 
 def train_from_config(
@@ -222,6 +241,9 @@ def train_model(
     best_epoch = None
     epochs_without_improvement = 0
     start_epoch = 1
+    best_metric_name = _best_metric_name(config)
+    val_interval = config.training.val_interval
+    print(f"[train] Best-checkpoint selection metric: {best_metric_name} (val_interval={val_interval})")
 
     last_checkpoint = run_dir / "last.pt"
     if resume and last_checkpoint.exists():
@@ -237,13 +259,14 @@ def train_model(
         history = list(state.get("history") or [])
         best_score = state.get("best_score")
         best_epoch = _best_epoch_from_history(history)
-        if best_score is not None and state.get("best_metric") != BEST_METRIC:
-            # Older checkpoints tracked best_score as val loss (lower is
-            # better); comparing a mAP against it would never update the best.
+        if best_score is not None and state.get("best_metric") != best_metric_name:
+            # Scores on different metrics aren't comparable (older checkpoints
+            # even tracked val loss, where lower was better), so a stale best
+            # would never — or wrongly — be beaten.
             print(
                 f"[train] Resume: checkpoint tracked best_score on a different "
                 f"metric ({state.get('best_metric')!r}), now selecting on "
-                f"{BEST_METRIC}; restarting best-model tracking"
+                f"{best_metric_name}; restarting best-model tracking"
             )
             best_score = None
             best_epoch = None
@@ -270,7 +293,17 @@ def train_model(
 
         val_summary = None
         val_map_summary = None
-        if val_loader is not None:
+        # Validation runs every `val_interval` epochs; the final epoch always
+        # validates so the run ends with a scored epoch (and thus a best.pt).
+        run_val = val_loader is not None and (
+            epoch % val_interval == 0 or epoch == config.training.epochs
+        )
+        if val_loader is not None and not run_val:
+            print(
+                f"[train] Run {run_name} epoch {epoch}: skipping validation "
+                f"(val_interval={val_interval})"
+            )
+        if run_val:
             print(f"[train] Run {run_name} epoch {epoch}: evaluating validation loss")
             val_summary = evaluate_loss(
                 adapter,
@@ -298,11 +331,11 @@ def train_model(
         if scheduler is not None:
             scheduler.step()
 
-        # The best checkpoint is selected on val mAP50 (higher is better),
-        # not val loss: the summed loss mixes objectness/cls/box terms and
-        # routinely diverges from detection quality. mAP50 rewards finding the
-        # object at a lenient IoU rather than tight localization (mAP50-95).
-        score = val_map_summary["map50"] if val_map_summary is not None else None
+        # The best checkpoint is selected on the configured val metric(s)
+        # (training.best_metric, higher is better; several are averaged), not
+        # val loss: the summed loss mixes objectness/cls/box terms and
+        # routinely diverges from detection quality.
+        score = _best_metric_score(config, val_map_summary)
         is_best = score is not None and (best_score is None or score > best_score)
         if is_best:
             best_score = score
@@ -317,6 +350,10 @@ def train_model(
             # Compact subset only: the full metrics dict (per_class etc.) would
             # bloat history.yaml and every checkpoint.
             "val_map": _compact_map_summary(val_map_summary),
+            # What checkpoint selection tracked this epoch, so progress
+            # displays can label the score without knowing the config.
+            "best_metric": best_metric_name,
+            "best_metric_score": score,
             "lr": _current_lr(optimizer),
             "is_best": is_best,
         }
@@ -332,7 +369,7 @@ def train_model(
             "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
             "scaler_state_dict": scaler.state_dict() if scaler is not None else None,
             "best_score": best_score,
-            "best_metric": BEST_METRIC,
+            "best_metric": best_metric_name,
             "history": history,
         }
         save_checkpoint(checkpoint, run_dir / "last.pt")
@@ -348,18 +385,20 @@ def train_model(
             f"val_loss={val_summary.get('loss') if val_summary else None} "
             f"val_map50={val_map_summary.get('map50') if val_map_summary else None} "
             f"val_map50_95={val_map_summary.get('map50_95') if val_map_summary else None} "
+            f"{best_metric_name}={score} "
             f"lr={_current_lr(optimizer)} best={is_best}"
         )
 
-        # Early stopping: once val mAP hasn't improved for `patience` epochs, stop
-        # — the best.pt checkpoint already holds the best epoch, so continuing just
-        # overfits. Only active when a val set produced a score.
+        # Early stopping: once the best metric hasn't improved for `patience`
+        # *scored* epochs (val_interval > 1 skips epochs without scoring them),
+        # stop — the best.pt checkpoint already holds the best epoch, so
+        # continuing just overfits. Only active when a val set produced a score.
         patience = config.training.early_stopping_patience
         if patience is not None and score is not None and epochs_without_improvement >= patience:
             print(
                 f"[train] Run {run_name} early stopping at epoch {epoch}: no val "
-                f"improvement for {epochs_without_improvement} epoch(s) "
-                f"(best epoch {best_epoch}, best_val_map50={best_score})"
+                f"improvement for {epochs_without_improvement} scored epoch(s) "
+                f"(best epoch {best_epoch}, best {best_metric_name}={best_score})"
             )
             break
 
@@ -397,7 +436,8 @@ def train_model(
         "run_name": run_name,
         "run_dir": str(run_dir),
         "best_epoch": best_epoch,
-        "best_val_map50": best_score,
+        "best_metric": best_metric_name,
+        "best_score": best_score,
         "best_loss": _val_loss_at_epoch(history, best_epoch),
         "last_epoch": history[-1]["epoch"] if history else config.training.epochs,
         "last_train_loss": history[-1]["train"]["loss"] if history else None,

@@ -100,6 +100,20 @@ training:
   amp: false
   gradient_clip_norm: null
 
+  # Optional. Stop after N scored epochs without best-metric improvement.
+  # null disables early stopping.
+  early_stopping_patience: null
+
+  # Optional. Which val metric selects best.pt (and drives early stopping).
+  # One of: map50, map50_95, precision, recall, f1 — or a list, whose average
+  # is tracked, e.g. [f1, map50]. Defaults to map50.
+  best_metric: map50
+
+  # Optional. Run validation every N epochs; the final epoch always validates.
+  # Defaults to 1 (every epoch). Note early_stopping_patience counts *scored*
+  # epochs, so with val_interval: 5 a patience of 3 spans 15 train epochs.
+  val_interval: 1
+
   optimizer:
     name: adamw
     lr: 0.0001

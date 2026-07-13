@@ -79,6 +79,16 @@ class Experiment(models.Model):
     """
 
     OPTIMIZER_CHOICES = [("adamw", "adamw"), ("adam", "adam"), ("sgd", "sgd")]
+    # Values are what the trainer's training.best_metric accepts; a "+" joins
+    # metrics whose AVERAGE is tracked (config_gen splits on it).
+    BEST_METRIC_CHOICES = [
+        ("map50", "map50"),
+        ("map50_95", "map50_95"),
+        ("precision", "precision"),
+        ("recall", "recall"),
+        ("f1", "f1"),
+        ("f1+map50", "f1+map50 (average of both)"),
+    ]
     SCHEDULER_CHOICES = [
         ("none", "none"),
         ("step", "step"),
@@ -109,9 +119,21 @@ class Experiment(models.Model):
     )
     early_stopping_patience = models.PositiveIntegerField(
         null=True, blank=True,
-        help_text="Stop a model's training after this many epochs with no validation-loss "
-                  "improvement (the best checkpoint is kept). Blank = train all epochs. "
-                  "Needs a val dataset.",
+        help_text="Stop a model's training after this many scored epochs with no "
+                  "best-metric improvement (the best checkpoint is kept). Blank = "
+                  "train all epochs. Needs a val dataset.",
+    )
+    best_metric = models.CharField(
+        max_length=32, choices=BEST_METRIC_CHOICES, default="map50",
+        help_text="Validation metric that selects each run's best checkpoint and "
+                  "drives early stopping. precision/recall/f1 are computed at the "
+                  "eval score threshold; f1+map50 tracks the average of both.",
+    )
+    val_interval = models.PositiveIntegerField(
+        default=1,
+        help_text="Run validation every N epochs (the final epoch always validates). "
+                  "1 = every epoch. Early-stopping patience counts scored epochs only, "
+                  "so patience 3 with interval 5 spans 15 train epochs.",
     )
 
     optimizer_name = models.CharField(max_length=16, choices=OPTIMIZER_CHOICES, default="adamw")

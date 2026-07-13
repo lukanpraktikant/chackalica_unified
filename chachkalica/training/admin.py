@@ -115,6 +115,7 @@ class ExperimentAdmin(admin.ModelAdmin):
                 "fields": [
                     "epochs", "batch_size", "num_workers", "device", "seed",
                     "amp", "gradient_clip_norm", "early_stopping_patience",
+                    "best_metric", "val_interval",
                     "optimizer_name", "lr", "weight_decay", "optimizer_params",
                     "scheduler_name", "scheduler_params",
                 ]

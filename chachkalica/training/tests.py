@@ -198,6 +198,18 @@ class ConfigGenTests(TestCase):
         )
         ed.clean()  # must not raise: the fraction is inert while unticked
 
+    def test_best_metric_and_val_interval_flow_into_training_dict(self):
+        data = config_gen.build_experiment_dict(self.exp, "/out/exp1")
+        self.assertEqual(data["training"]["best_metric"], ["map50"])  # default
+        self.assertEqual(data["training"]["val_interval"], 1)
+
+        self.exp.best_metric = "f1+map50"
+        self.exp.val_interval = 5
+        self.exp.save()
+        data = config_gen.build_experiment_dict(self.exp, "/out/exp1")
+        self.assertEqual(data["training"]["best_metric"], ["f1", "map50"])
+        self.assertEqual(data["training"]["val_interval"], 5)
+
     def test_early_stopping_patience_flows_into_training_dict(self):
         self.exp.early_stopping_patience = 10
         self.exp.save()
