@@ -155,3 +155,40 @@ def export_onnx(checkpoint_path, onnx_path, ts: TrainingSettings | None = None) 
             f"trainer /export_onnx returned HTTP {resp.status_code}: {detail}"
         )
     return resp.json()
+
+
+# Building a TensorRT engine (optimize + compile the ONNX graph for the GPU) can
+# take several minutes — well past the ONNX export timeout.
+TRT_BUILD_TIMEOUT = 1800
+
+
+def export_trt(
+    checkpoint_path, engine_path, precision: str = "fp16",
+    ts: TrainingSettings | None = None,
+) -> dict:
+    """Build a TensorRT engine from one ``.pt`` via the trainer service.
+
+    Returns ``{"engine_path", "meta_path", "provenance_path"}``. Synchronous: the
+    service ensures the ONNX exists, compiles the engine on the GPU in its own env,
+    and returns once the files are on the shared filesystem. Unlike ``export_onnx``,
+    this uses the GPU and contends with active training.
+    """
+    payload = {
+        "checkpoint_path": str(checkpoint_path),
+        "engine_path": str(engine_path),
+        "precision": str(precision),
+    }
+    resp = requests.post(
+        f"{base_url(ts)}/export_trt", json=payload, timeout=TRT_BUILD_TIMEOUT)
+    if resp.status_code >= 400:
+        detail = resp.text
+        try:
+            body = resp.json()
+        except ValueError:
+            body = None
+        if isinstance(body, dict) and body.get("detail"):
+            detail = str(body["detail"])
+        raise RuntimeError(
+            f"trainer /export_trt returned HTTP {resp.status_code}: {detail}"
+        )
+    return resp.json()

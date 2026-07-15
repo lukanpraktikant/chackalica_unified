@@ -37,7 +37,7 @@ from training.models import (
     TrainingRun,
     TrainingSettings,
 )
-from training import model_specs
+from training import model_specs, pipelines
 from training.forms import ExperimentModelForm
 from training.services import config_gen, ingest, promote, runner, teardown
 
@@ -126,7 +126,27 @@ class ExperimentAdmin(admin.ModelAdmin):
             {"fields": ["eval_batch_size", "eval_num_workers", "eval_score_threshold",
                         "eval_operating_nms_threshold", "iou_thresholds"]},
         ),
+        (
+            "Training / Eval pipeline",
+            {
+                "fields": ["pipeline", "tile_width_pct", "tile_height_pct",
+                           "overlap", "merge_nms_iou"],
+                "description": "Optionally run train, val, and test through a chachak "
+                               "pipeline. Only the selected pipeline's fields apply.",
+            },
+        ),
     ]
+
+    class Media:
+        js = ("training/experiment_pipeline_form.js",)
+
+    def formfield_for_dbfield(self, db_field, request, **kwargs):
+        # Offer only pipelines supported end-to-end today (blank = full-frame,
+        # plus batch_detect). Others are hidden until train-loop support lands.
+        field = super().formfield_for_dbfield(db_field, request, **kwargs)
+        if db_field.name == "pipeline" and field is not None:
+            field.choices = [("", "---------"), *pipelines.EXPERIMENT_PIPELINE_CHOICES]
+        return field
 
     @admin.display(description="datasets")
     def dataset_count(self, obj):
@@ -206,8 +226,8 @@ class TrainingRunAdmin(admin.ModelAdmin):
     list_filter = ["status", "experiment"]
     inlines = [RunResultInline]
     actions = [
-        "launch_selected", "view_hard_val_images", "ingest_selected",
-        "reconcile_selected", "kill_run_gracefully",
+        "launch_selected", "resume_selected", "pause_selected", "view_hard_val_images",
+        "ingest_selected", "reconcile_selected", "kill_run_gracefully",
     ]
     readonly_fields = [
         "experiment", "status", "epoch_progress", "config_yaml_path", "output_dir",
@@ -400,6 +420,54 @@ class TrainingRunAdmin(admin.ModelAdmin):
             run.save(update_fields=["status"])
         self.message_user(request, "Launch job(s) queued — refresh to see progress.")
 
+    @admin.action(description="Resume from checkpoint (last.pt)")
+    def resume_selected(self, request, queryset):
+        """Relaunch, passing resume=True so the trainer picks up each sub-run's
+        last.pt instead of retraining from scratch.
+
+        Meant for runs stranded at ``running``/``queued`` by a trainer restart,
+        or for a ``paused`` run — run "Reconcile status from trainer / disk"
+        first so the row reflects reality before resuming a stranded run.
+        """
+        queue = _queue()
+        for run in queryset:
+            if not run.config_yaml_path:
+                self.message_user(request, f"Run #{run.pk} has no config; skipped.",
+                                  level=messages.WARNING)
+                continue
+            queue.enqueue(jobs.run_training, run.pk, resume=True, job_timeout=jobs.JOB_TIMEOUT)
+            run.status = TrainingRun.QUEUED
+            run.save(update_fields=["status"])
+        self.message_user(request, "Resume job(s) queued — refresh to see progress.")
+
+    @admin.action(description="Pause run (stop, keep row for later resume)")
+    def pause_selected(self, request, queryset):
+        """Stop the trainer process but leave the run's files/DB row intact.
+
+        Sets the row to ``paused`` *before* asking the trainer to stop, so the
+        poller in ``jobs.run_training`` (which checks the DB status each loop
+        iteration) sees the pause and exits cleanly instead of racing the
+        trainer's own post-kill status and marking the run ``error``. Resume
+        later with "Resume from checkpoint (last.pt)".
+        """
+        for run in queryset:
+            if run.status not in (TrainingRun.RUNNING, TrainingRun.QUEUED):
+                self.message_user(
+                    request, f"Run #{run.pk} is {run.status}, not running/queued; skipped.",
+                    level=messages.WARNING,
+                )
+                continue
+            run.status = TrainingRun.PAUSED
+            run.save(update_fields=["status"])
+            try:
+                result = runner.stop(run)
+                outcome = result.get("outcome") or result.get("status")
+            except Exception as exc:  # noqa: BLE001 - row is already paused either way
+                self.message_user(request, f"Run #{run.pk}: paused, but stop request failed: {exc}",
+                                  level=messages.WARNING)
+                continue
+            self.message_user(request, f"Run #{run.pk}: paused ({outcome}).")
+
     @admin.action(description="Ingest results from output dir (no rerun)")
     def ingest_selected(self, request, queryset):
         from training.services import ingest
@@ -591,7 +659,7 @@ class TrainedModelAdmin(admin.ModelAdmin):
     list_display = ["name", "stage", "arch", "num_classes", "map50", "map50_95", "created_at"]
     list_filter = ["stage", "arch"]
     search_fields = ["name", "description"]
-    actions = ["evaluate", "preview_on_dataset", "export_onnx", "view_hard_val_images"]
+    actions = ["evaluate", "preview_on_dataset", "export_onnx", "export_trt", "view_hard_val_images"]
     readonly_fields = ["source_run_result", "created_at", "updated_at"]
 
     @admin.display(description="mAP50")
@@ -714,11 +782,32 @@ class TrainedModelAdmin(admin.ModelAdmin):
             "tiling_pipelines": " ".join([
                 PipelineEvalRun.BATCH_DETECT, PipelineEvalRun.BATCH_PEOPLE, PipelineEvalRun.CHAIN]),
             "chain_pipelines": PipelineEvalRun.CHAIN,
+            # Pre-fill the pipeline fields from the experiment the model came from,
+            # so a later manual eval defaults to the params the model was trained
+            # with. Empty dict when the model has no originating experiment or that
+            # experiment had no pipeline.
+            "pipeline_defaults": self._experiment_pipeline_defaults(model),
             "action": "evaluate",
             "selected": [str(model.pk)],
             "action_checkbox_name": ACTION_CHECKBOX_NAME,
         }
         return TemplateResponse(request, "admin/training/evaluate_model.html", context)
+
+    @staticmethod
+    def _experiment_pipeline_defaults(model) -> dict:
+        """Pipeline config saved on the experiment this model was trained in."""
+        rr = getattr(model, "source_run_result", None)
+        experiment = getattr(getattr(rr, "run", None), "experiment", None)
+        if experiment is None or not experiment.pipeline:
+            return {}
+        return {
+            "pipeline": experiment.pipeline,
+            "detector_checkpoint": experiment.detector_checkpoint,
+            "tile_width_pct": experiment.tile_width_pct,
+            "tile_height_pct": experiment.tile_height_pct,
+            "overlap": experiment.overlap,
+            "chain": ", ".join(experiment.chain or []),
+        }
 
     # ------------------------------------------------------------------ preview
     RAW_PIPELINE = ("raw", "Raw model (no pipeline)")
@@ -867,6 +956,75 @@ class TrainedModelAdmin(admin.ModelAdmin):
             "action_checkbox_name": ACTION_CHECKBOX_NAME,
         }
         return TemplateResponse(request, "admin/training/export_onnx.html", context)
+
+    # ------------------------------------------------------------------- TensorRT export
+    @admin.action(description="Export best + last to TensorRT…")
+    def export_trt(self, request, queryset):
+        """Build TensorRT engines for a model's best and last ``.pt`` under a chosen dir.
+
+        Drives the trainer service's synchronous ``/export_trt`` (the build must run
+        in the trainer's GPU env), writing ``<name>-best.engine`` / ``<name>-last.engine``
+        (each with sibling ``.meta.json`` + ``.engine.json``) into the operator's
+        directory. Relative paths resolve against the project root.
+
+        NOTE: unlike ONNX export, this uses the GPU and competes with active training;
+        engines are non-portable (tied to the trainer's GPU + TensorRT version).
+        """
+        if queryset.count() != 1:
+            self.message_user(request, "Select exactly one model to export.",
+                              level=messages.WARNING)
+            return None
+        model = queryset.first()
+        checkpoints = self._export_checkpoints(model)
+        if not checkpoints:
+            self.message_user(
+                request, f"{model.name}: no checkpoint on record to export.",
+                level=messages.WARNING)
+            return None
+
+        if request.POST.get("apply"):
+            output_dir = (request.POST.get("output_dir") or "").strip()
+            if not output_dir:
+                self.message_user(request, "Enter an output directory.",
+                                  level=messages.WARNING)
+                return None
+            precision = (request.POST.get("precision") or "fp16").strip()
+            if precision not in ("fp16", "fp32"):
+                precision = "fp16"
+            out_dir = config_gen._resolve(output_dir)
+            stem = self._onnx_stem(model.name)
+            exported = 0
+            for label, checkpoint in checkpoints:
+                engine_path = out_dir / f"{stem}-{label}.engine"
+                try:
+                    result = runner.export_trt(checkpoint, engine_path, precision=precision)
+                except Exception as exc:  # noqa: BLE001 - surface service/network errors
+                    self.message_user(
+                        request, f"{label} ({checkpoint}): {exc}", level=messages.ERROR)
+                    continue
+                exported += 1
+                self.message_user(
+                    request,
+                    f"Built {label} → {result.get('engine_path')} "
+                    f"(+ {Path(result.get('meta_path', '')).name}).")
+            if exported:
+                self.message_user(
+                    request, f"Built {exported} engine(s) for {model.name} ({precision}).")
+            return None
+
+        ts = TrainingSettings.load()
+        default_dir = config_gen._resolve(ts.runs_root) / "trt_exports"
+        context = {
+            **self.admin_site.each_context(request),
+            "title": f"Export {model.name} to TensorRT",
+            "model": model,
+            "checkpoints": [{"label": label, "path": path} for label, path in checkpoints],
+            "default_output_dir": str(default_dir),
+            "action": "export_trt",
+            "selected": [str(model.pk)],
+            "action_checkbox_name": ACTION_CHECKBOX_NAME,
+        }
+        return TemplateResponse(request, "admin/training/export_trt.html", context)
 
     def get_urls(self):
         custom = [

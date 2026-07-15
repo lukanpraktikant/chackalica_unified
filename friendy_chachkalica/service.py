@@ -134,6 +134,11 @@ _predict_cache: dict = {}  # {key: {"kind", "obj", "info", "device"}}, size 1
 # (and keep them off the predict path's toes) with a dedicated lock.
 _export_lock = threading.Lock()
 
+# TensorRT engine builds run ON THE GPU (unlike ONNX export) and are memory- and
+# compute-heavy, so they contend with active training. A dedicated lock serializes
+# builds; operators should avoid building while a training run is using the GPU.
+_trt_build_lock = threading.Lock()
+
 _service_log().info("service starting (max_concurrent=%s, logs=%s)", MAX_CONCURRENT, LOGS_DIR)
 
 
@@ -158,6 +163,18 @@ class ExportOnnxRequest(BaseModel):
 
     checkpoint_path: str
     onnx_path: str
+
+
+class ExportTrtRequest(BaseModel):
+    """Build a TensorRT engine at ``<engine_path>`` from one ``.pt`` checkpoint.
+
+    The ONNX export runs first when no sibling ``.onnx`` exists yet (the engine is
+    compiled from the ONNX graph). ``precision`` is ``"fp16"`` (default) or ``"fp32"``.
+    """
+
+    checkpoint_path: str
+    engine_path: str
+    precision: str = "fp16"
 
 
 class PredictImageRequest(BaseModel):
@@ -600,6 +617,60 @@ def export_onnx(req: ExportOnnxRequest):
     meta_path = onnx_path.with_suffix(".meta.json")
     log.info("exported %s -> %s", checkpoint, onnx_path)
     return {"onnx_path": str(onnx_path), "meta_path": str(meta_path)}
+
+
+@app.post("/export_trt")
+def export_trt(req: ExportTrtRequest):
+    """Build a TensorRT engine from a checkpoint synchronously.
+
+    Ensures the ONNX artifact exists (exporting it first if needed), then compiles
+    it into ``<engine_path>`` via ``trt_export/cli.py``, alongside a verbatim
+    ``.meta.json`` copy and a ``.engine.json`` provenance sidecar.
+
+    UNLIKE ``/export_onnx`` (CPU-only, safe while the GPU is training), this runs
+    ON THE GPU and competes with active training — serialized behind
+    ``_trt_build_lock``. It also requires TensorRT installed in this env and a
+    visible GPU; the produced engine is tied to that exact GPU + TRT version.
+    """
+    log = _service_log()
+    checkpoint = Path(req.checkpoint_path)
+    if not checkpoint.exists():
+        log.error("trt build rejected: checkpoint not found: %s", checkpoint)
+        raise HTTPException(status_code=400, detail=f"checkpoint not found: {checkpoint}")
+    if req.precision not in ("fp16", "fp32"):
+        raise HTTPException(status_code=400, detail=f"precision must be fp16 or fp32, got {req.precision!r}")
+
+    with _trt_build_lock:
+        try:
+            from trt_export.cli import build_engine
+
+            engine_path = build_engine(
+                req.checkpoint_path, req.engine_path, precision=req.precision
+            )
+        except HTTPException:
+            raise
+        except (ValueError, FileNotFoundError) as exc:
+            log.warning("trt build rejected: %s", exc)
+            raise HTTPException(status_code=400, detail=str(exc))
+        except ModuleNotFoundError as exc:  # tensorrt not installed in this env
+            log.error("trt build unavailable: %s", exc)
+            raise HTTPException(
+                status_code=501,
+                detail=f"TensorRT not available in the trainer env: {exc}",
+            )
+        except Exception as exc:  # noqa: BLE001 - surface build failures to the caller
+            log.exception("trt build failed: %s", exc)
+            raise HTTPException(status_code=500, detail=f"trt build failed: {exc}")
+
+    engine_path = Path(engine_path)
+    meta_path = engine_path.with_suffix(".meta.json")
+    provenance_path = Path(str(engine_path) + ".json")
+    log.info("built engine %s -> %s", checkpoint, engine_path)
+    return {
+        "engine_path": str(engine_path),
+        "meta_path": str(meta_path),
+        "provenance_path": str(provenance_path),
+    }
 
 
 if __name__ == "__main__":

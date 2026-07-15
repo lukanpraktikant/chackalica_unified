@@ -33,6 +33,7 @@ _STATUS_COLORS = {
     "ok": "#22c55e",
     "running": "#f59e0b",
     "queued": "#9ca3af",
+    "paused": "#3b82f6",
     "warning": "#f97316",
     "error": "#ef4444",
 }
@@ -239,6 +240,7 @@ class DatasetAdmin(admin.ModelAdmin):
         "setup_for_all_active",
         "sync_all_projects",
         "setup_sync_one_annotator",
+        "promote_annotator_labels",
         "merge_selected",
         "analyze_selected",
         "preview_labels",
@@ -307,6 +309,51 @@ class DatasetAdmin(admin.ModelAdmin):
             "action_checkbox_name": ACTION_CHECKBOX_NAME,
         }
         return TemplateResponse(request, "admin/fleet/pick_annotator.html", context)
+
+    @admin.action(description="Promote an annotator's annotations to source labels…")
+    def promote_annotator_labels(self, request, queryset):
+        """Move an annotator's synced labels into each dataset's source labels/ folder.
+
+        Runs synchronously (a local file move — no Label Studio calls), so the
+        result is reported straight back rather than queued. The operator picks
+        one annotator, then that annotator's ``.txt`` output is moved from
+        ``target/<dataset>/<username>/`` to ``source/<dataset>/labels/`` for every
+        selected dataset.
+        """
+        datasets = sorted(queryset, key=lambda d: d.name)
+
+        if request.POST.get("apply"):
+            annotator = Annotator.objects.filter(pk=request.POST.get("annotator")).first()
+            if annotator is None:
+                self.message_user(request, "Choose an annotator.", level=messages.WARNING)
+                return None
+            for dataset in datasets:
+                try:
+                    result = datasets_svc.promote_annotator_labels(dataset, annotator)
+                except (FileNotFoundError, OSError) as exc:
+                    self.message_user(request, f"{dataset.name}: {exc}", level=messages.ERROR)
+                    continue
+                self.message_user(
+                    request,
+                    f"{dataset.name}: promoted {result['moved']} label file(s) from "
+                    f"{annotator.username} to {result['dest']}.",
+                )
+            return None
+
+        active = list(Annotator.objects.filter(status=Annotator.ACTIVE).order_by("username"))
+        if not active:
+            self.message_user(request, "No active annotators to promote from.", level=messages.WARNING)
+            return None
+        context = {
+            **self.admin_site.each_context(request),
+            "title": "Promote annotator annotations to source",
+            "datasets": datasets,
+            "annotators": active,
+            "action": "promote_annotator_labels",
+            "selected": [str(d.pk) for d in datasets],
+            "action_checkbox_name": ACTION_CHECKBOX_NAME,
+        }
+        return TemplateResponse(request, "admin/fleet/promote_annotator.html", context)
 
     @admin.action(description="Merge selected datasets into a new dataset…")
     def merge_selected(self, request, queryset):

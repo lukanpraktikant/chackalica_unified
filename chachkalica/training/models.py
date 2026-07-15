@@ -17,6 +17,7 @@ friendy_chachkalica service (and ingesting metrics) is a later phase — a
 from django.db import models
 
 from fleet.models import Annotator, Dataset
+from training import pipelines
 
 # Defaults lifted from friendy_chachkalica's configs/config_reference.yaml so the
 # generated YAML matches a hand-written one field-for-field.
@@ -169,6 +170,44 @@ class Experiment(models.Model):
     )
     iou_thresholds = models.JSONField(default=default_iou_thresholds, blank=True)
 
+    # --- train / eval pipeline (chachak) ---
+    # When set, the model is trained (tiling pipelines only), validated, and
+    # tested through this chachak pipeline — one consistent image representation
+    # across all three phases. Blank = plain full-frame training/eval.
+    pipeline = models.CharField(
+        max_length=32, choices=pipelines.PIPELINE_CHOICES, blank=True,
+        help_text="Run train (tiling only), val, and test through this chachak pipeline. "
+                  "Blank = plain full-frame training and eval.",
+    )
+    detector_checkpoint = models.CharField(
+        max_length=1024, blank=True,
+        help_text="Person-detector checkpoint; required for people_detect_first / "
+                  "batch_people (and any chain that includes them). Used for val/test only.",
+    )
+    tile_width_pct = models.FloatField(
+        null=True, blank=True,
+        help_text="Tile width as a percent (0–100] of each image's width. Blank = "
+                  "chachak's default.",
+    )
+    tile_height_pct = models.FloatField(
+        null=True, blank=True,
+        help_text="Tile height as a percent (0–100] of each image's height. Blank = "
+                  "chachak's default.",
+    )
+    overlap = models.FloatField(
+        null=True, blank=True,
+        help_text="Fraction (0–1) by which adjacent tiles overlap. Blank = default.",
+    )
+    merge_nms_iou = models.FloatField(
+        null=True, blank=True,
+        help_text="Class-aware NMS IoU used to merge predictions across tiles/crops. "
+                  "Blank = chachak's default.",
+    )
+    chain = models.JSONField(
+        default=list, blank=True,
+        help_text="Ordered pipeline names for the 'chain' pipeline.",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -284,11 +323,13 @@ class ExperimentModel(models.Model):
     YOLOX = "yolox"
     RTDETR = "rtdetr"
     RFDETR = "rfdetr"
+    FASTERRCNN = "fasterrcnn"
     ARCH_CHOICES = [
         (RETINANET, "retinanet"),
         (YOLOX, "yolox"),
         (RTDETR, "rtdetr"),
         (RFDETR, "rfdetr"),
+        (FASTERRCNN, "fasterrcnn"),
     ]
 
     experiment = models.ForeignKey(Experiment, on_delete=models.CASCADE, related_name="models")
@@ -328,12 +369,14 @@ class TrainingRun(models.Model):
     CREATED = "created"
     QUEUED = "queued"
     RUNNING = "running"
+    PAUSED = "paused"
     OK = "ok"
     ERROR = "error"
     STATUS_CHOICES = [
         (CREATED, "created"),
         (QUEUED, "queued"),
         (RUNNING, "running"),
+        (PAUSED, "paused"),
         (OK, "ok"),
         (ERROR, "error"),
     ]

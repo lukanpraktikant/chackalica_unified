@@ -128,6 +128,74 @@ ARCH_FIELD_SPECS: dict[str, list[dict]] = {
             "help": "Re-init the head when the pretrained class count differs.",
         },
     ],
+    "fasterrcnn": [
+        {
+            "key": "variant", "label": "Size / variant", "kind": "choice",
+            "choices": [
+                "resnet50_fpn", "resnet50_fpn_v2",
+                "mobilenet_v3_large_fpn", "mobilenet_v3_large_320_fpn",
+            ],
+            "default": "resnet50_fpn_v2",
+            "help": "Faster R-CNN backbone/FPN variant. resnet50_fpn_v2 has the best "
+                    "accuracy; the mobilenet_v3 variants trade accuracy for speed. "
+                    "torchvision's COCO-pretrained weights for every variant are "
+                    "BSD-3-Clause (safe for commercial use) — tick 'pretrained' to load them.",
+        },
+        {
+            "key": "weights_backbone", "label": "Backbone weights", "kind": "str",
+            "help": "ImageNet backbone weights, e.g. DEFAULT. Ignored when "
+                    "'pretrained' loads the full COCO weights.",
+        },
+        {
+            "key": "trainable_backbone_layers", "label": "Trainable backbone layers",
+            "kind": "int",
+            "help": "How many backbone stages to fine-tune (0–5). Blank = torchvision default.",
+        },
+        {
+            "key": "box_score_thresh", "label": "Box score threshold", "kind": "float",
+            "help": "Final-detection confidence floor applied by the RoI head. "
+                    "Blank = torchvision default (0.05).",
+        },
+        {
+            "key": "box_nms_thresh", "label": "Box NMS threshold", "kind": "float",
+            "help": "IoU threshold for the final class-aware NMS. Blank = torchvision "
+                    "default (0.5).",
+        },
+        {
+            "key": "box_detections_per_img", "label": "Detections per image", "kind": "int",
+            "help": "Max final detections kept per image. Blank = torchvision default (100).",
+        },
+        {
+            "key": "rpn_pre_nms_top_n_test", "label": "RPN pre-NMS top-N (eval)", "kind": "int",
+            "help": "Proposals kept per FPN level before RPN NMS, at inference time. "
+                    "Blank = torchvision default (1000).",
+        },
+        {
+            "key": "rpn_post_nms_top_n_test", "label": "RPN post-NMS top-N (eval)", "kind": "int",
+            "help": "Proposals kept after RPN NMS, at inference time — this is how many "
+                    "get fed to the RoI heads (the main proposal-count/speed knob). "
+                    "Blank = torchvision default (1000).",
+        },
+        {
+            "key": "rpn_nms_thresh", "label": "RPN NMS threshold", "kind": "float",
+            "help": "IoU threshold for suppressing overlapping proposals. Blank = "
+                    "torchvision default (0.7).",
+        },
+        {
+            "key": "rpn_score_thresh", "label": "RPN score threshold", "kind": "float",
+            "help": "Objectness floor for dropping proposals early. Blank = torchvision "
+                    "default (0.0).",
+        },
+        {
+            "key": "min_size", "label": "Resize min side", "kind": "int",
+            "help": "Shorter-side resize target before the backbone. Blank = torchvision "
+                    "default (800).",
+        },
+        {
+            "key": "max_size", "label": "Resize max side", "kind": "int",
+            "help": "Longer-side resize cap. Blank = torchvision default (1333).",
+        },
+    ],
     "yolox": [
         {
             "key": "variant", "label": "Size / variant", "kind": "choice",

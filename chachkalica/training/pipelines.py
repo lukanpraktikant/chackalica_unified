@@ -1,0 +1,37 @@
+"""Canonical chachak pipeline vocabulary for the Django app.
+
+Both :class:`training.models.Experiment` (the train/eval pipeline attached to an
+experiment) and :class:`eval_pipelines.models.PipelineEvalRun` (a standalone
+pipeline eval) reference these constants, so the choices live in exactly one
+place.
+
+Keep in sync with ``chachak.config.PIPELINE_NAMES`` — we can't import chachak
+here (its package pulls in torch, absent in the app env), so this list is a
+hand-maintained mirror.
+"""
+
+BATCH_DETECT = "batch_detect"
+PEOPLE_DETECT_FIRST = "people_detect_first"
+BATCH_PEOPLE = "batch_people"
+CHAIN = "chain"
+
+PIPELINE_CHOICES = [
+    (BATCH_DETECT, "batch_detect — tile, detect per tile, merge"),
+    (PEOPLE_DETECT_FIRST, "people_detect_first — detect people, crop, detect per crop"),
+    (BATCH_PEOPLE, "batch_people — tile, detect people, crop, detect per crop"),
+    (CHAIN, "chain — run several pipelines and merge"),
+]
+
+# Pipelines that require a person-detector checkpoint.
+DETECTOR_PIPELINES = {PEOPLE_DETECT_FIRST, BATCH_PEOPLE}
+
+# Pipelines that support being trained *through* (tiling only, for now). Other
+# pipelines still route val/test inference through chachak but train on full
+# frames — they decide crops from a detector at inference, which has no
+# training-time analogue.
+TRAINABLE_PIPELINES = {BATCH_DETECT}
+
+# Pipelines offered in the Experiment UI: only those supported end-to-end
+# (train + val + test) today. The rest are hidden until train-loop support
+# lands, so an operator can't pick a pipeline that would train on full frames.
+EXPERIMENT_PIPELINE_CHOICES = [c for c in PIPELINE_CHOICES if c[0] in TRAINABLE_PIPELINES]

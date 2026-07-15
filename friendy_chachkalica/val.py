@@ -11,13 +11,13 @@ try:
     from .data import build_eval_dataloader
     from .device import resolve_device
     from .registry import build_model
-    from .train import predict_dataset, resolve_operating_nms_threshold
+    from .train import build_run_pipeline, predict_dataset, resolve_operating_nms_threshold
 except ImportError:
     from config import DatasetConfig, ExperimentConfig, ExperimentRun, build_experiment_runs, load_config
     from data import build_eval_dataloader
     from device import resolve_device
     from registry import build_model
-    from train import predict_dataset, resolve_operating_nms_threshold
+    from train import build_run_pipeline, predict_dataset, resolve_operating_nms_threshold
 
 
 def val_from_config(
@@ -110,6 +110,12 @@ def evaluate_run(
     state = torch.load(checkpoint_path, map_location=device)
     adapter.model.load_state_dict(state["model_state_dict"])
 
+    # Route inference through the experiment's pipeline (tiling / crop) when set,
+    # so val/test metrics match how the model will be served. None otherwise.
+    eval_pipeline = build_run_pipeline(adapter, config, device)
+    if eval_pipeline is not None:
+        print(f"[val] Inference routed through chachak pipeline: {config.pipeline.name}")
+
     prediction_path = run_dir / f"{split}_predictions.pt"
     metrics = predict_dataset(
         adapter,
@@ -122,6 +128,7 @@ def evaluate_run(
         target_classes=dataset_config.classes,
         eval_classes=dataset_config.classes,
         operating_nms_threshold=resolve_operating_nms_threshold(config, run.model),
+        pipeline=eval_pipeline,
     )
 
     result = {

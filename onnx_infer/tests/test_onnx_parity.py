@@ -25,6 +25,7 @@ pytest.importorskip("onnx")
 pytest.importorskip("onnxruntime")
 
 from friendy_chachkalica.registry import build_model  # noqa: E402
+from friendy_chachkalica.onnx_export.arch.fasterrcnn import export_fasterrcnn  # noqa: E402
 from friendy_chachkalica.onnx_export.arch.retinanet import export_retinanet  # noqa: E402
 from friendy_chachkalica.onnx_export.arch.yolox import export_yolox  # noqa: E402
 from friendy_chachkalica.onnx_export.arch.rtdetr import export_rtdetr  # noqa: E402
@@ -96,6 +97,48 @@ def test_retinanet_parity(retinanet_export, hw):
     onnx_pred = onnx_adapter.predict([image], score_threshold=threshold)[0].detach().cpu().numpy()
 
     _assert_parity(torch_pred, onnx_pred, min_dets=10)
+
+
+# --------------------------------------------------------------------------- Faster R-CNN
+
+
+@pytest.fixture(scope="module")
+def fasterrcnn_export(tmp_path_factory):
+    torch.manual_seed(0)
+    # From scratch, offline, smallest/fastest variant. Unlike RetinaNet/YOLOX,
+    # torchvision's FastRCNNPredictor has no prior-probability bias init (plain
+    # nn.Linear default init), so a random-init model's box-head softmax scores
+    # land near-uniform across classes — well above any real score floor. No head
+    # surgery needed to get a non-trivial multi-detection set.
+    adapter = build_model(
+        "fasterrcnn", num_classes=3, variant="mobilenet_v3_large_320_fpn", weights=False,
+    )
+    adapter.eval()
+    out_dir = tmp_path_factory.mktemp("fasterrcnn")
+    onnx_path = out_dir / "model.onnx"
+    meta = export_fasterrcnn(
+        adapter, num_classes=3, params={},
+        class_map={0: "a", 1: "b", 2: "c"}, onnx_path=onnx_path,
+    )
+    onnx_path.with_suffix(".meta.json").write_text(json.dumps(meta))
+    return adapter, onnx_path
+
+
+@pytest.mark.parametrize("hw", [(480, 640), (512, 512)])
+def test_fasterrcnn_parity(fasterrcnn_export, hw):
+    adapter, onnx_path = fasterrcnn_export
+    onnx_adapter, info = load_onnx_adapter(onnx_path, "cpu")
+    assert info["num_classes"] == 3
+    assert info["train_classes"] == {0: "a", 1: "b", 2: "c"}
+
+    torch.manual_seed(1)
+    image = torch.rand(3, *hw)
+    threshold = 0.05
+    torch_pred = adapter.predict([image])[0].detach().cpu().numpy()
+    torch_pred = torch_pred[torch_pred[:, 4] >= threshold]  # match the graph's score floor
+    onnx_pred = onnx_adapter.predict([image], score_threshold=threshold)[0].detach().cpu().numpy()
+
+    _assert_parity(torch_pred, onnx_pred, min_dets=5)
 
 
 # --------------------------------------------------------------------------- YOLOX

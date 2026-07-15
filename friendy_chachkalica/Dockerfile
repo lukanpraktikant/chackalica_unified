@@ -26,10 +26,16 @@ WORKDIR /app
 # Copied into the package subdir so the `-r requirements.txt` refs still resolve.
 COPY friendy_chachkalica/requirements.txt friendy_chachkalica/requirements-rtdetr.txt \
      friendy_chachkalica/requirements-rfdetr.txt friendy_chachkalica/requirements-yolox.txt \
+     friendy_chachkalica/requirements-trt.txt \
      /app/friendy_chachkalica/
 RUN pip install --no-cache-dir \
         -r /app/friendy_chachkalica/requirements-rtdetr.txt \
         -r /app/friendy_chachkalica/requirements-rfdetr.txt
+
+# TensorRT engine export (/export_trt). GPU-only; the wheel matching the torch
+# CUDA major is resolved from the bare `tensorrt` package. Kept as its own layer
+# so a CPU-only or non-TRT build can drop this line without touching the rest.
+RUN pip install --no-cache-dir -r /app/friendy_chachkalica/requirements-trt.txt
 
 # Both packages, preserving the repo-root layout. friendy_chachkalica runs flat
 # (its modules import each other bare, with cwd on sys.path — WORKDIR below);

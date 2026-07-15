@@ -78,6 +78,31 @@ class EvaluationConfig:
 
 
 @dataclass(frozen=True)
+class TilingSpec:
+    # Blank knobs are None so chachak's own defaults apply downstream.
+    tile_width_pct: Optional[float] = None
+    tile_height_pct: Optional[float] = None
+    overlap: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class PipelineSpec:
+    """A chachak pipeline attached to the experiment (train/val/test).
+
+    Present only when the experiment YAML has a top-level ``pipeline`` block.
+    ``name`` is one of chachak's pipeline names (batch_detect, ...). The knobs
+    mirror the chachak request; anything left None falls back to chachak's
+    defaults when the pipeline is built.
+    """
+
+    name: str
+    detector_checkpoint: Optional[Path] = None
+    tiling: TilingSpec = field(default_factory=TilingSpec)
+    chain: List[str] = field(default_factory=list)
+    merge_nms_iou: Optional[float] = None
+
+
+@dataclass(frozen=True)
 class ExperimentConfig:
     name: str
     train_datasets: List[DatasetConfig]
@@ -87,6 +112,7 @@ class ExperimentConfig:
     test_dataset: Optional[DatasetConfig] = None
     training: TrainingConfig = field(default_factory=TrainingConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
+    pipeline: Optional[PipelineSpec] = None
     raw: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -98,6 +124,7 @@ class ExperimentRun:
     model_index: int
     val_dataset: Optional[DatasetConfig] = None
     test_dataset: Optional[DatasetConfig] = None
+    pipeline: Optional["PipelineSpec"] = None
 
     @property
     def name(self) -> str:
@@ -134,6 +161,7 @@ def load_config(config_path: str | Path) -> ExperimentConfig:
     models = _parse_models(_require_list(raw, "models"))
     training = _parse_training(raw.get("training", {}))
     evaluation = _parse_evaluation(raw.get("evaluation", {}))
+    pipeline = _parse_pipeline(raw.get("pipeline"), base_dir)
 
     config = ExperimentConfig(
         name=name,
@@ -144,13 +172,16 @@ def load_config(config_path: str | Path) -> ExperimentConfig:
         output_dir=output_dir,
         training=training,
         evaluation=evaluation,
+        pipeline=pipeline,
         raw=raw,
     )
     print(
         "[config] Loaded "
         f"name={config.name} train_datasets={len(config.train_datasets)} "
         f"models={len(config.models)} val={config.val_dataset is not None} "
-        f"test={config.test_dataset is not None} output_dir={config.output_dir}"
+        f"test={config.test_dataset is not None} "
+        f"pipeline={config.pipeline.name if config.pipeline else None} "
+        f"output_dir={config.output_dir}"
     )
     return config
 
@@ -167,6 +198,7 @@ def build_experiment_runs(config: ExperimentConfig) -> List[ExperimentRun]:
                     model_index=model_index,
                     val_dataset=config.val_dataset,
                     test_dataset=config.test_dataset,
+                    pipeline=config.pipeline,
                 )
             )
     print(f"[config] Expanded experiment matrix to {len(runs)} run(s)")
@@ -528,6 +560,67 @@ def _parse_evaluation(value: Any) -> EvaluationConfig:
         nms_threshold=nms_threshold,
         operating_nms_threshold=operating_nms_threshold,
         iou_thresholds=iou_thresholds,
+    )
+
+
+# Mirror of chachak.config.PIPELINE_NAMES; kept local so parsing the config does
+# not import chachak (which imports friendy back).
+PIPELINE_NAMES = ("batch_detect", "people_detect_first", "batch_people", "chain")
+
+
+def _parse_pipeline(value: Any, base_dir: Path) -> Optional[PipelineSpec]:
+    """Parse the optional top-level ``pipeline`` block.
+
+    Returns ``None`` when absent (plain full-frame training/eval). Only the knobs
+    present in the YAML are set; the rest stay ``None`` so chachak's defaults
+    apply when the pipeline is built.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("pipeline must be a mapping")
+
+    name = _require_str(value, "name")
+    if name not in PIPELINE_NAMES:
+        raise ValueError(f"pipeline.name must be one of {PIPELINE_NAMES}")
+
+    detector_raw = value.get("detector") or {}
+    if not isinstance(detector_raw, dict):
+        raise ValueError("pipeline.detector must be a mapping")
+    detector_checkpoint = detector_raw.get("checkpoint")
+    if detector_checkpoint is not None:
+        detector_checkpoint = _resolve_path(detector_checkpoint, base_dir)
+
+    tiling_raw = value.get("tiling") or {}
+    if not isinstance(tiling_raw, dict):
+        raise ValueError("pipeline.tiling must be a mapping")
+
+    def _opt_float(raw: Any, field_name: str) -> Optional[float]:
+        if raw is None:
+            return None
+        return float(raw)
+
+    tiling = TilingSpec(
+        tile_width_pct=_opt_float(tiling_raw.get("tile_width_pct"), "tile_width_pct"),
+        tile_height_pct=_opt_float(tiling_raw.get("tile_height_pct"), "tile_height_pct"),
+        overlap=_opt_float(tiling_raw.get("overlap"), "overlap"),
+    )
+
+    chain = value.get("chain") or []
+    if not isinstance(chain, list):
+        raise ValueError("pipeline.chain must be a list")
+    chain = [str(entry) for entry in chain]
+
+    merge_nms_iou = value.get("merge_nms_iou")
+    if merge_nms_iou is not None:
+        merge_nms_iou = float(merge_nms_iou)
+
+    return PipelineSpec(
+        name=name,
+        detector_checkpoint=detector_checkpoint,
+        tiling=tiling,
+        chain=chain,
+        merge_nms_iou=merge_nms_iou,
     )
 
 

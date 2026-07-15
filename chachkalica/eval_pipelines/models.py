@@ -14,6 +14,7 @@ fields describe *which* pipeline and its detector/tiling knobs.
 from django.db import models
 
 from fleet.models import Annotator, Dataset
+from training import pipelines
 from training.models import EvalRun, ExperimentDataset, TrainedModel, default_iou_thresholds
 
 
@@ -39,20 +40,15 @@ class PipelineEvalRun(models.Model):
     ANNOTATOR = ExperimentDataset.ANNOTATOR
     EXPLICIT = ExperimentDataset.EXPLICIT
 
-    # Keep in sync with chachak.config.PIPELINE_NAMES — we can't import chachak
-    # here (its package/pipeline imports pull in torch, absent in the app env).
-    BATCH_DETECT = "batch_detect"
-    PEOPLE_DETECT_FIRST = "people_detect_first"
-    BATCH_PEOPLE = "batch_people"
-    CHAIN = "chain"
-    PIPELINE_CHOICES = [
-        (BATCH_DETECT, "batch_detect — tile, detect per tile, merge"),
-        (PEOPLE_DETECT_FIRST, "people_detect_first — detect people, crop, detect per crop"),
-        (BATCH_PEOPLE, "batch_people — tile, detect people, crop, detect per crop"),
-        (CHAIN, "chain — run several pipelines and merge"),
-    ]
+    # Pipeline vocabulary lives in ``training.pipelines`` so the Experiment and
+    # this model share one definition (kept in sync with chachak.config).
+    BATCH_DETECT = pipelines.BATCH_DETECT
+    PEOPLE_DETECT_FIRST = pipelines.PEOPLE_DETECT_FIRST
+    BATCH_PEOPLE = pipelines.BATCH_PEOPLE
+    CHAIN = pipelines.CHAIN
+    PIPELINE_CHOICES = pipelines.PIPELINE_CHOICES
     # Pipelines that require a person detector checkpoint.
-    DETECTOR_PIPELINES = {PEOPLE_DETECT_FIRST, BATCH_PEOPLE}
+    DETECTOR_PIPELINES = pipelines.DETECTOR_PIPELINES
 
     trained_model = models.ForeignKey(
         TrainedModel, on_delete=models.CASCADE, related_name="pipeline_eval_runs"

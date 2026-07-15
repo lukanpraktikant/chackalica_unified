@@ -6,13 +6,14 @@ webhook pointing back at the /hook receiver, and persist a ``Project`` row that
 remembers the real ``ls_project_id`` + ``webhook_id``.
 """
 
+import shutil
 from pathlib import Path
 
 import requests
 
 from fleet.models import Annotator, Dataset, FleetSettings, Project, project_title
 from fleet.services import lsapi
-from fleet.services.paths import annotator_base_url, source_root
+from fleet.services.paths import annotator_base_url, source_root, target_root
 
 WEBHOOK_ACTIONS = ["ANNOTATION_CREATED", "ANNOTATION_UPDATED", "ANNOTATIONS_DELETED"]
 
@@ -40,6 +41,46 @@ def detect_labels(dataset: Dataset, *, persist: bool = True) -> bool:
         dataset.has_labels = has
         dataset.save(update_fields=["has_labels"])
     return has
+
+
+def promote_annotator_labels(dataset: Dataset, annotator: Annotator, fs: FleetSettings | None = None) -> dict:
+    """Move an annotator's synced label ``.txt`` files into the source labels/ folder.
+
+    Annotator output lives at ``target/<dataset>/<username>/*.txt`` (written by
+    sync); the dataset's source-of-truth labels live at
+    ``source/<dataset>/labels/*.txt`` alongside the images and classes.txt in the
+    dataset root. This makes the annotator's annotations the source labels by
+    moving every ``.txt`` across, overwriting any existing source label of the
+    same name. Images and classes.txt in the dataset root are untouched.
+    """
+    fs = fs or FleetSettings.load()
+    src_dir = target_root(fs) / dataset.name / annotator.username
+    if not src_dir.is_dir():
+        raise FileNotFoundError(
+            f"No annotator output for {annotator.username} at {src_dir} — "
+            "sync the annotator's project first."
+        )
+
+    txts = sorted(src_dir.glob("*.txt"))
+    if not txts:
+        raise FileNotFoundError(
+            f"{annotator.username} has no label .txt files at {src_dir} — nothing to promote."
+        )
+
+    dest_dir = labels_source_dir(dataset, fs)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    for txt in txts:
+        shutil.move(str(txt), str(dest_dir / txt.name))
+
+    # Source labels now exist — refresh the flag so the admin/training path sees them.
+    detect_labels(dataset)
+    return {
+        "dataset": dataset.name,
+        "annotator": annotator.username,
+        "moved": len(txts),
+        "dest": str(dest_dir),
+    }
 
 
 def _webhook_target(webhook_base: str, *, dataset: str, username: str, project_id: int) -> str:

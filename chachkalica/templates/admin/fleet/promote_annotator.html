@@ -1,0 +1,34 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+<p>Move one annotator's annotations into the <strong>source labels/</strong> folder
+   (overwriting any existing source label of the same name) for the following dataset(s):</p>
+<ul>
+  {% for dataset in datasets %}<li>{{ dataset.name }}</li>{% endfor %}
+</ul>
+<p>Images and <code>classes.txt</code> in the dataset root are left untouched.</p>
+
+<form action="" method="post">
+  {% csrf_token %}
+  {% for pk in selected %}
+    <input type="hidden" name="{{ action_checkbox_name }}" value="{{ pk }}">
+  {% endfor %}
+  <input type="hidden" name="action" value="{{ action }}">
+  <input type="hidden" name="apply" value="1">
+
+  <p>
+    <label for="annotator">Annotator:</label>
+    <select name="annotator" id="annotator" required>
+      <option value="">— choose —</option>
+      {% for annotator in annotators %}
+        <option value="{{ annotator.pk }}">{{ annotator.username }}</option>
+      {% endfor %}
+    </select>
+  </p>
+
+  <div class="submit-row">
+    <input type="submit" class="default" value="Promote to source">
+    <a href="../" class="button cancel-link">Cancel</a>
+  </div>
+</form>
+{% endblock %}

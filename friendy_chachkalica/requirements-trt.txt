@@ -1,0 +1,14 @@
+# TensorRT export/build extras (GPU only). Layers on top of requirements.txt,
+# which already brings CUDA-enabled torch — used both to build engines
+# (trt_export) and, together with torch, to run them (trt_infer) without any
+# pycuda / cuda-python dependency (device buffers + stream are managed via torch).
+#
+# Pick the wheel matching the CUDA major of the installed torch build:
+#   torch cu12.x  -> tensorrt-cu12   |   torch cu13.x -> tensorrt-cu13
+# The bare `tensorrt` meta-package resolves to a CUDA-specific wheel; pin the
+# `-cuNN` variant if the resolver picks the wrong one for your torch build.
+-r requirements.txt
+tensorrt
+# Graph surgery to append the EfficientNMS_TRT plugin node for archs whose baked
+# NMS (retinanet, yolox) TensorRT can't compile directly.
+onnx_graphsurgeon

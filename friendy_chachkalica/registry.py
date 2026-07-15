@@ -1,9 +1,11 @@
 try:
+    from .adapters.fasterrcnn import build_fasterrcnn
     from .adapters.retinanet import build_retinanet
     from .adapters.rfdetr import build_rfdetr
     from .adapters.rtdetr import build_rtdetr
     from .adapters.yolox import build_yolox
 except ImportError:
+    from adapters.fasterrcnn import build_fasterrcnn
     from adapters.retinanet import build_retinanet
     from adapters.rfdetr import build_rfdetr
     from adapters.rtdetr import build_rtdetr
@@ -11,6 +13,7 @@ except ImportError:
 
 
 MODEL_REGISTRY = {
+    "fasterrcnn": build_fasterrcnn,
     "retinanet": build_retinanet,
     "rfdetr": build_rfdetr,
     "rtdetr": build_rtdetr,
@@ -28,6 +31,9 @@ def build_model(name, **kwargs):
             variant.
 
     Weight examples:
+        build_model("fasterrcnn", num_classes=3)
+        build_model("fasterrcnn", num_classes=3, variant="mobilenet_v3_large_fpn")
+        build_model("fasterrcnn", num_classes=91, weights="DEFAULT")
         build_model("retinanet", num_classes=3)
         build_model("retinanet", num_classes=3, weights_backbone="DEFAULT")
         build_model("retinanet", num_classes=91, weights="DEFAULT")

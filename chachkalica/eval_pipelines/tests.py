@@ -2,13 +2,14 @@
 
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 import yaml
 from django.test import TestCase
 
 from fleet.models import Dataset, FleetSettings
-from training.models import Experiment, RunResult, TrainingRun
-from training.services import config_gen, ingest, promote
+from training.models import Experiment, ExperimentDataset, RunResult, TrainingRun
+from training.services import autoeval, config_gen, ingest, promote
 
 from eval_pipelines.models import PipelineEvalRun
 
@@ -114,3 +115,52 @@ class PipelineRequestTests(TestCase):
         ingest.ingest_pipeline_eval(pe)
         pe.refresh_from_db()
         self.assertEqual(pe.metric("map50_95"), 0.44)
+
+
+class AutoEvalPipelineTests(TestCase):
+    """When the experiment has a pipeline, the post-training test eval is a
+    PipelineEvalRun (lands in the Eval Pipelines tab), not a plain EvalRun."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        (self.root / "source").mkdir()
+        fs = FleetSettings.load()
+        fs.source_dir = str(self.root / "source")
+        fs.target_dir = str(self.root / "target")
+        fs.save()
+
+        self.ds = Dataset.objects.create(name="testds")
+        self.exp = Experiment.objects.create(
+            name="exp1", pipeline=PipelineEvalRun.BATCH_DETECT,
+            tile_width_pct=50, overlap=0.2,
+        )
+        ExperimentDataset.objects.create(
+            experiment=self.exp, dataset=self.ds, role=ExperimentDataset.TEST,
+        )
+        self.run = TrainingRun.objects.create(experiment=self.exp)
+        RunResult.objects.create(
+            run=self.run, run_name="00-x-00-retinanet", model_arch="retinanet",
+            train_dataset_name="x",
+            best_checkpoint=str(self.root / "best.pt"),
+        )
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_creates_pipeline_eval_run_with_copied_config(self):
+        with mock.patch.object(autoeval, "_queue") as queue, \
+                mock.patch.object(autoeval.config_gen, "write_pipeline_request"):
+            queued = autoeval.schedule_test_evals(self.run)
+
+        self.assertEqual(len(queued), 1)
+        pe = PipelineEvalRun.objects.get(pk=queued[0])
+        self.assertEqual(pe.pipeline, PipelineEvalRun.BATCH_DETECT)
+        self.assertEqual(pe.tile_width_pct, 50)
+        self.assertEqual(pe.overlap, 0.2)
+        self.assertEqual(pe.dataset, self.ds)
+        self.assertEqual(pe.status, PipelineEvalRun.QUEUED)
+        queue.return_value.enqueue.assert_called_once()
+        self.assertEqual(
+            queue.return_value.enqueue.call_args.args[0], "training.jobs.run_pipeline_eval"
+        )

@@ -1,0 +1,52 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+<p>Export model <strong>{{ model.name }}</strong> ({{ model.arch }}) to TensorRT.</p>
+<p class="help">Each checkpoint below is compiled to
+<code>&lt;dir&gt;/{{ model.name }}-&lt;best|last&gt;.engine</code> plus a sibling
+<code>.meta.json</code> and a <code>.engine.json</code> provenance file. The build runs
+in the trainer service's GPU environment (the ONNX artifact is exported first if
+missing), so the directory must be on the shared filesystem. Relative paths resolve
+against the project root.</p>
+
+<p class="help"><strong>Note:</strong> unlike ONNX export, a TensorRT build uses the GPU
+and competes with any active training run, and the resulting engine is tied to the
+trainer's exact GPU + TensorRT version (not portable to other hardware).</p>
+
+<p>Checkpoints to export:</p>
+<ul>
+  {% for c in checkpoints %}
+    <li><strong>{{ c.label }}</strong> — <code>{{ c.path }}</code></li>
+  {% endfor %}
+</ul>
+
+<form action="" method="post">
+  {% csrf_token %}
+  {% for pk in selected %}
+    <input type="hidden" name="{{ action_checkbox_name }}" value="{{ pk }}">
+  {% endfor %}
+  <input type="hidden" name="action" value="{{ action }}">
+  <input type="hidden" name="apply" value="1">
+
+  <div class="form-row">
+    <label for="output_dir">Output directory:</label>
+    <input type="text" name="output_dir" id="output_dir" size="80"
+           value="{{ default_output_dir }}" required>
+    <p class="help">Directory the <code>.engine</code> + sidecars are written into
+    (created if missing).</p>
+  </div>
+
+  <div class="form-row">
+    <label for="precision">Precision:</label>
+    <select name="precision" id="precision">
+      <option value="fp16" selected>FP16 (faster; falls back to FP32 if unsupported)</option>
+      <option value="fp32">FP32 (most faithful)</option>
+    </select>
+  </div>
+
+  <div class="submit-row">
+    <input type="submit" class="default" value="Export to TensorRT">
+    <a href="../" class="button cancel-link">Cancel</a>
+  </div>
+</form>
+{% endblock %}

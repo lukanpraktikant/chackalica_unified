@@ -10,6 +10,7 @@ from fleet.models import Annotator, Dataset, FleetSettings, Project
 from fleet.reconcile import txt_format
 from fleet.services import analytics as analytics_svc
 from fleet.services import data_quality_solve
+from fleet.services import datasets as datasets_svc
 from fleet.services import lsapi
 from fleet.services import merge as merge_svc
 
@@ -559,3 +560,73 @@ class DatasetTeardownTests(TestCase):
 
         del_proj.assert_not_called()
         self.assertFalse(Dataset.objects.filter(id=dataset.id).exists())
+
+
+class PromoteAnnotatorLabelsTests(TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.src = self.root / "source"
+        self.tgt = self.root / "target"
+        self.src.mkdir()
+        self.tgt.mkdir()
+        fs = FleetSettings.load()
+        fs.source_dir = str(self.src)
+        fs.target_dir = str(self.tgt)
+        fs.save()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _annotator_dir(self, dataset_name, username):
+        d = self.tgt / dataset_name / username
+        d.mkdir(parents=True)
+        return d
+
+    def test_moves_txt_files_into_source_labels_and_sets_flag(self):
+        dataset = _make_dataset(
+            self.src, "ds", "# tools: bbox\n", ["person"], ["a.jpg", "b.jpg"],
+        )
+        ann = Annotator.objects.create(username="ann1")
+        ann_dir = self._annotator_dir("ds", "ann1")
+        (ann_dir / "a.jpg.txt").write_text("0 0.5 0.5 0.2 0.2\n", encoding="utf-8")
+        (ann_dir / "b.jpg.txt").write_text("0 0.1 0.1 0.1 0.1\n", encoding="utf-8")
+
+        result = datasets_svc.promote_annotator_labels(dataset, ann)
+
+        labels_dir = self.src / "ds" / "labels"
+        self.assertEqual(result["moved"], 2)
+        self.assertTrue((labels_dir / "a.jpg.txt").exists())
+        self.assertTrue((labels_dir / "b.jpg.txt").exists())
+        # Moved, not copied — the annotator folder is emptied of txts.
+        self.assertEqual(list(ann_dir.glob("*.txt")), [])
+        dataset.refresh_from_db()
+        self.assertTrue(dataset.has_labels)
+
+    def test_overwrites_existing_source_label_of_same_name(self):
+        dataset = _make_dataset(
+            self.src, "ds", "# tools: bbox\n", ["person"], ["a.jpg"],
+            labels={"a.jpg.txt": "OLD\n"},
+        )
+        ann = Annotator.objects.create(username="ann1")
+        ann_dir = self._annotator_dir("ds", "ann1")
+        (ann_dir / "a.jpg.txt").write_text("NEW\n", encoding="utf-8")
+
+        datasets_svc.promote_annotator_labels(dataset, ann)
+
+        self.assertEqual(
+            (self.src / "ds" / "labels" / "a.jpg.txt").read_text(encoding="utf-8"), "NEW\n"
+        )
+
+    def test_missing_annotator_output_raises(self):
+        dataset = _make_dataset(self.src, "ds", "# tools: bbox\n", ["person"], ["a.jpg"])
+        ann = Annotator.objects.create(username="ann1")
+        with self.assertRaises(FileNotFoundError):
+            datasets_svc.promote_annotator_labels(dataset, ann)
+
+    def test_empty_annotator_folder_raises(self):
+        dataset = _make_dataset(self.src, "ds", "# tools: bbox\n", ["person"], ["a.jpg"])
+        ann = Annotator.objects.create(username="ann1")
+        self._annotator_dir("ds", "ann1")  # exists but no .txt files
+        with self.assertRaises(FileNotFoundError):
+            datasets_svc.promote_annotator_labels(dataset, ann)

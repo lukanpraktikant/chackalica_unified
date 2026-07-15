@@ -113,6 +113,37 @@ class ConfigGenTests(TestCase):
         with self.assertRaises(ValueError):
             config_gen.build_experiment_dict(self.exp, "/out")
 
+    def test_no_pipeline_block_when_unset(self):
+        data = config_gen.build_experiment_dict(self.exp, "/out/exp1")
+        self.assertNotIn("pipeline", data)
+
+    def test_batch_detect_pipeline_block(self):
+        self.exp.pipeline = "batch_detect"
+        self.exp.tile_width_pct = 50
+        self.exp.tile_height_pct = 40
+        self.exp.overlap = 0.2
+        self.exp.merge_nms_iou = 0.5
+        self.exp.save()
+        data = config_gen.build_experiment_dict(self.exp, "/out/exp1")
+        self.assertEqual(data["pipeline"]["name"], "batch_detect")
+        self.assertEqual(
+            data["pipeline"]["tiling"],
+            {"tile_width_pct": 50, "tile_height_pct": 40, "overlap": 0.2},
+        )
+        self.assertEqual(data["pipeline"]["merge_nms_iou"], 0.5)
+        self.assertNotIn("detector", data["pipeline"])
+
+    def test_detector_pipeline_requires_checkpoint(self):
+        self.exp.pipeline = "people_detect_first"
+        self.exp.save()
+        with self.assertRaises(ValueError):
+            config_gen.build_experiment_dict(self.exp, "/out/exp1")
+
+        self.exp.detector_checkpoint = "/ckpts/person.pt"
+        self.exp.save()
+        data = config_gen.build_experiment_dict(self.exp, "/out/exp1")
+        self.assertEqual(data["pipeline"]["detector"], {"checkpoint": "/ckpts/person.pt"})
+
     def test_at_most_one_val(self):
         _make_dataset_on_disk(self.source, "ds2", ["helmet"])
         ds2 = Dataset.objects.create(name="ds2")
@@ -253,6 +284,24 @@ class ExperimentAdminRenderTests(TestCase):
             if 'id="id_datasets-0-aug_hflip"' in line and 'type="checkbox"' in line
         )
         self.assertIn('title="Randomly mirror images', checkbox)
+
+    def test_add_form_renders_pipeline_section(self):
+        from django.contrib.auth.models import User
+
+        user = User.objects.create_superuser("admin2", "admin2@example.com", "pw")
+        self.client.force_login(user)
+        resp = self.client.get("/admin/training/experiment/add/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "Training / Eval pipeline")
+        self.assertContains(resp, 'id="id_pipeline"')
+        for name in ["tile_width_pct", "tile_height_pct", "overlap", "merge_nms_iou"]:
+            self.assertContains(resp, name)
+        self.assertContains(resp, "training/experiment_pipeline_form.js")
+        # Only batching is supported end-to-end today; other pipelines are
+        # filtered out of the dropdown.
+        self.assertContains(resp, 'value="batch_detect"')
+        self.assertNotContains(resp, 'value="people_detect_first"')
+        self.assertNotContains(resp, 'value="chain"')
 
 
 class RFDETRResolutionValidationTests(TestCase):

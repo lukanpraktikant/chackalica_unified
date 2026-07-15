@@ -36,6 +36,104 @@ except ImportError:
     from postprocess import apply_class_aware_nms
     from registry import build_model
 
+try:
+    from .tiling import tile_batch
+except ImportError:
+    from tiling import tile_batch
+
+# Pipelines the model can be *trained through*: only tiling (batch_detect) has a
+# well-defined training-time analogue (train on tiles). Other pipelines route
+# val/test inference through chachak but train on full frames.
+_TRAINABLE_PIPELINES = {"batch_detect"}
+
+
+def _ensure_chachak_importable() -> None:
+    """Put the repo root on sys.path so ``import chachak`` resolves in-process.
+
+    chachak lives at ``<repo_root>/chachak`` and shares this torch/CUDA env.
+    Mirrors ``service._ensure_chachak_importable``.
+    """
+    import sys
+
+    root = str(Path(__file__).resolve().parent.parent)
+    if root not in sys.path:
+        sys.path.insert(0, root)
+
+
+def _pipeline_needs_detector(spec: Any) -> bool:
+    if spec.name in {"people_detect_first", "batch_people"}:
+        return True
+    if spec.name == "chain":
+        return any(c in {"people_detect_first", "batch_people"} for c in spec.chain)
+    return False
+
+
+def build_run_pipeline(adapter: Any, config: ExperimentConfig, device: torch.device):
+    """Build a chachak pipeline wrapping the *live* in-memory ``adapter``, or None.
+
+    Returns ``None`` when the experiment has no pipeline configured. Used for
+    val/test inference (``process_batch``) so metrics reflect the same pipeline
+    the model will be served through — no checkpoint reload, the pipeline holds
+    the live adapter by reference so it always predicts with current weights.
+    Detector pipelines load their person detector from disk once here.
+    """
+    spec = config.pipeline
+    if spec is None:
+        return None
+
+    _ensure_chachak_importable()
+    from chachak.config import pipeline_config_from_dict
+    from chachak.detector import load_detector
+    from chachak.registry import build_pipeline
+
+    # chachak's PipelineConfig requires model_checkpoint/images/labels/classes/
+    # output_dir, but process_batch touches none of them (no dataloader; classes
+    # come from the live adapter). Placeholders mirror the predict endpoint.
+    raw: Dict[str, Any] = {
+        "pipeline": spec.name,
+        "model_checkpoint": ".",
+        "images": ".",
+        "labels": ".",
+        "output_dir": ".",
+        "classes": ["_"],
+        "device": str(device),
+        "infer_batch_size": config.evaluation.batch_size or config.training.batch_size,
+        # Keep the low-confidence tail so mAP can sweep the PR curve, matching
+        # _predict_with_config's score_threshold handling.
+        "score_threshold": config.evaluation.score_threshold,
+    }
+    if config.evaluation.map_score_threshold is not None:
+        raw["map_score_threshold"] = config.evaluation.map_score_threshold
+    if spec.detector_checkpoint is not None:
+        raw["detector"] = {"checkpoint": str(spec.detector_checkpoint)}
+    tiling: Dict[str, Any] = {}
+    if spec.tiling.tile_width_pct is not None:
+        tiling["tile_width_pct"] = spec.tiling.tile_width_pct
+    if spec.tiling.tile_height_pct is not None:
+        tiling["tile_height_pct"] = spec.tiling.tile_height_pct
+    if spec.tiling.overlap is not None:
+        tiling["overlap"] = spec.tiling.overlap
+    if tiling:
+        raw["tiling"] = tiling
+    if spec.merge_nms_iou is not None:
+        raw["merge_nms_iou"] = spec.merge_nms_iou
+    if spec.chain:
+        raw["chain"] = list(spec.chain)
+
+    pipeline_config = pipeline_config_from_dict(raw, Path(__file__).resolve().parent)
+
+    detector = None
+    if _pipeline_needs_detector(spec):
+        detector = load_detector(
+            pipeline_config.detector.checkpoint,
+            device,
+            person_class_name=pipeline_config.detector.person_class_name,
+            person_class_id=pipeline_config.detector.person_class_id,
+            score_threshold=pipeline_config.detector.score_threshold,
+            batch_size=pipeline_config.infer_batch_size,
+        )
+    return build_pipeline(pipeline_config, adapter, device, detector)
+
 
 def resolve_operating_nms_threshold(
     config: ExperimentConfig,
@@ -267,6 +365,13 @@ def train_model(
         f"(val_interval={val_interval} operating_nms_threshold={operating_nms_threshold})"
     )
 
+    # When the experiment has a pipeline, val (and post-train test) inference is
+    # routed through it. The pipeline wraps the live adapter by reference, so it
+    # always predicts with the current epoch's weights.
+    eval_pipeline = build_run_pipeline(adapter, config, device)
+    if eval_pipeline is not None:
+        print(f"[train] Val/test inference routed through chachak pipeline: {config.pipeline.name}")
+
     last_checkpoint = run_dir / "last.pt"
     if resume and last_checkpoint.exists():
         print(f"[train] Resuming run {run_name} from checkpoint: {last_checkpoint}")
@@ -349,6 +454,7 @@ def train_model(
                     else train_dataset_config.classes
                 ),
                 operating_nms_threshold=operating_nms_threshold,
+                pipeline=eval_pipeline,
             )
 
         if scheduler is not None:
@@ -444,6 +550,7 @@ def train_model(
             target_classes=run.test_dataset.classes if run.test_dataset is not None else None,
             eval_classes=run.test_dataset.classes if run.test_dataset is not None else None,
             operating_nms_threshold=operating_nms_threshold,
+            pipeline=eval_pipeline,
         )
     else:
         prediction_path = None
@@ -489,36 +596,52 @@ def train_one_epoch(
     total_images = 0
     loss_totals: Dict[str, float] = {}
 
+    # A tiling pipeline turns each frame into several smaller tile samples, so a
+    # loader batch expands into more (smaller) samples than batch_size. We
+    # re-chunk the expanded samples back into batch_size micro-batches, each its
+    # own optimizer step, to keep per-step memory in line with untiled training.
+    tile = config.pipeline is not None and config.pipeline.name in _TRAINABLE_PIPELINES
+    micro_bs = max(1, config.training.batch_size)
+
     for images, targets in loader:
         images, targets = _move_batch_to_device(images, targets, device)
-        optimizer.zero_grad(set_to_none=True)
 
-        with _autocast_context(config, device, adapter):
-            loss, loss_items = adapter.training_step(images, targets)
+        if tile:
+            images, targets = tile_batch(images, targets, config.pipeline.tiling)
+            if not images:
+                continue  # every tile in this batch was all-background
 
-        if scaler is not None:
-            scaler.scale(loss).backward()
-            if config.training.gradient_clip_norm is not None:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(
-                    adapter.model.parameters(),
-                    config.training.gradient_clip_norm,
-                )
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            loss.backward()
-            if config.training.gradient_clip_norm is not None:
-                torch.nn.utils.clip_grad_norm_(
-                    adapter.model.parameters(),
-                    config.training.gradient_clip_norm,
-                )
-            optimizer.step()
+        for start in range(0, len(images), micro_bs):
+            chunk_images = images[start : start + micro_bs]
+            chunk_targets = targets[start : start + micro_bs]
+            optimizer.zero_grad(set_to_none=True)
 
-        batch_size = len(images)
-        total_loss += float(loss.detach().cpu()) * batch_size
-        total_images += batch_size
-        _accumulate_losses(loss_totals, loss_items, batch_size)
+            with _autocast_context(config, device, adapter):
+                loss, loss_items = adapter.training_step(chunk_images, chunk_targets)
+
+            if scaler is not None:
+                scaler.scale(loss).backward()
+                if config.training.gradient_clip_norm is not None:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(
+                        adapter.model.parameters(),
+                        config.training.gradient_clip_norm,
+                    )
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                if config.training.gradient_clip_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(
+                        adapter.model.parameters(),
+                        config.training.gradient_clip_norm,
+                    )
+                optimizer.step()
+
+            batch_size = len(chunk_images)
+            total_loss += float(loss.detach().cpu()) * batch_size
+            total_images += batch_size
+            _accumulate_losses(loss_totals, loss_items, batch_size)
 
     return _summarize_losses(total_loss, total_images, loss_totals)
 
@@ -560,6 +683,7 @@ def evaluate_map(
     prediction_classes: Optional[Dict[int, str]] = None,
     target_classes: Optional[Dict[int, str]] = None,
     operating_nms_threshold: Optional[float] = None,
+    pipeline: Any = None,
 ) -> Dict[str, Any]:
     """Predict over a loader and compute detection metrics.
 
@@ -577,7 +701,9 @@ def evaluate_map(
     try:
         for images, targets in loader:
             images, targets = _move_batch_to_device(images, targets, device)
-            predictions = _predict_with_config(adapter, images, config)
+            predictions = _predict_with_config(
+                adapter, images, config, pipeline=pipeline, targets=targets
+            )
             predictions = _apply_eval_nms(predictions, config)
             for target, prediction in zip(targets, predictions):
                 prediction = prediction.detach().cpu()
@@ -638,6 +764,7 @@ def predict_dataset(
     target_classes: Optional[Dict[int, str]] = None,
     eval_classes: Optional[Dict[int, str]] = None,
     operating_nms_threshold: Optional[float] = None,
+    pipeline: Any = None,
 ) -> Dict[str, Any]:
     adapter.eval()
     records = []
@@ -648,7 +775,9 @@ def predict_dataset(
     print(f"[train] Predicting dataset to: {output_path} (started {started_at.isoformat(timespec='seconds')})")
     for batch_index, (images, targets) in enumerate(loader, start=1):
         images, targets = _move_batch_to_device(images, targets, device)
-        predictions = _predict_with_config(adapter, images, config)
+        predictions = _predict_with_config(
+            adapter, images, config, pipeline=pipeline, targets=targets
+        )
         predictions = _apply_eval_nms(predictions, config)
         print(f"[train] Predicted batch {batch_index}: images={len(images)}")
         for target, prediction in zip(targets, predictions):
@@ -817,7 +946,16 @@ def _predict_with_config(
     adapter: Any,
     images: List[torch.Tensor],
     config: Optional[ExperimentConfig],
+    pipeline: Any = None,
+    targets: Optional[List[Dict[str, Any]]] = None,
 ) -> List[torch.Tensor]:
+    # When a chachak pipeline is attached, inference runs through it (tiling /
+    # crop-around-people etc.) instead of a plain full-frame forward. It returns
+    # one full-frame-normalized (N, 6) Friendy tensor per image — the same shape
+    # adapter.predict yields — and already merges tile/crop duplicates.
+    if pipeline is not None:
+        return pipeline.process_batch(images, targets)
+
     if config is None:
         return adapter.predict(images)
 

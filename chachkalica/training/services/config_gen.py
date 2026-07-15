@@ -16,6 +16,7 @@ from django.conf import settings
 from fleet.services import datasets as datasets_svc
 from fleet.services import lsapi
 from fleet.services.paths import source_root, target_root
+from training import pipelines
 from training.models import (
     Experiment,
     ExperimentDataset,
@@ -106,8 +107,8 @@ def model_entry(exp_model: ExperimentModel) -> dict:
 
     The ``pretrained`` checkbox maps to ``weights: true`` — every adapter reads
     ``weights=True`` as "load the published COCO-pretrained weights" (retinanet,
-    rtdetr, yolox, rfdetr). An explicit ``weights`` in ``params`` (e.g. a path or
-    URL) is left untouched and wins over the checkbox.
+    rtdetr, yolox, rfdetr, fasterrcnn). An explicit ``weights`` in ``params`` (e.g. a
+    path or URL) is left untouched and wins over the checkbox.
     """
     params = dict(exp_model.params or {})
     entry = {
@@ -124,6 +125,47 @@ def _scheduler(experiment: Experiment):
     if experiment.scheduler_name == "none":
         return None
     return {"name": experiment.scheduler_name, **(experiment.scheduler_params or {})}
+
+
+def pipeline_block(experiment: Experiment) -> dict | None:
+    """The ``pipeline`` block for the experiment YAML, or ``None`` when unset.
+
+    Emits only non-blank knobs so chachak's own defaults apply where the operator
+    left a field empty. Raises ``ValueError`` when a detector-requiring pipeline
+    has no detector checkpoint (mirrors ``build_pipeline_request``).
+    """
+    name = experiment.pipeline
+    if not name:
+        return None
+
+    data: dict = {"name": name}
+
+    if name == pipelines.CHAIN and experiment.chain:
+        data["chain"] = list(experiment.chain)
+
+    needs_detector = name in pipelines.DETECTOR_PIPELINES or (
+        name == pipelines.CHAIN
+        and any(c in pipelines.DETECTOR_PIPELINES for c in (experiment.chain or []))
+    )
+    if experiment.detector_checkpoint:
+        data["detector"] = {"checkpoint": experiment.detector_checkpoint}
+    elif needs_detector:
+        raise ValueError(f"pipeline '{name}' requires a detector checkpoint.")
+
+    tiling: dict = {}
+    if experiment.tile_width_pct:
+        tiling["tile_width_pct"] = experiment.tile_width_pct
+    if experiment.tile_height_pct:
+        tiling["tile_height_pct"] = experiment.tile_height_pct
+    if experiment.overlap is not None:
+        tiling["overlap"] = experiment.overlap
+    if tiling:
+        data["tiling"] = tiling
+
+    if experiment.merge_nms_iou is not None:
+        data["merge_nms_iou"] = experiment.merge_nms_iou
+
+    return data
 
 
 def build_experiment_dict(experiment: Experiment, output_dir: Path | str) -> dict:
@@ -154,7 +196,9 @@ def build_experiment_dict(experiment: Experiment, output_dir: Path | str) -> dic
     if tests:
         datasets["test"] = dataset_entry(tests[0])
 
-    return {
+    pipeline = pipeline_block(experiment)
+
+    result = {
         "name": experiment.name,
         "output_dir": str(output_dir),
         "datasets": datasets,
@@ -194,6 +238,9 @@ def build_experiment_dict(experiment: Experiment, output_dir: Path | str) -> dic
             "iou_thresholds": experiment.iou_thresholds,
         },
     }
+    if pipeline is not None:
+        result["pipeline"] = pipeline
+    return result
 
 
 def build_yaml(experiment: Experiment, output_dir: Path | str) -> str:

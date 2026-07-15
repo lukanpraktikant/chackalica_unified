@@ -1,7 +1,7 @@
 """Per-architecture service handlers, one file per arch, dispatched by name —
 mirroring ``friendy_chachkalica/adapters`` + ``registry.py::MODEL_REGISTRY``.
 
-Adding a 6th arch is a drop-in: add ``arch/<name>.py`` with an ``ArchHandler``
+Adding a new arch is a drop-in: add ``arch/<name>.py`` with an ``ArchHandler``
 subclass and register it here.
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from ..errors import UnknownArchError
 from .base import ArchHandler
+from .fasterrcnn import FasterRCNNHandler
 from .retinanet import RetinaNetHandler
 from .rfdetr import RFDetrHandler
 from .rtdetr import RTDetrHandler
@@ -16,7 +17,9 @@ from .yolox import YOLOXHandler
 
 ARCH_REGISTRY: dict[str, ArchHandler] = {
     handler.name: handler
-    for handler in (RetinaNetHandler(), YOLOXHandler(), RTDetrHandler(), RFDetrHandler())
+    for handler in (
+        FasterRCNNHandler(), RetinaNetHandler(), YOLOXHandler(), RTDetrHandler(), RFDetrHandler(),
+    )
 }
 
 

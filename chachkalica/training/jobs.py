@@ -47,6 +47,12 @@ def run_training(run_id: int, resume: bool = False) -> dict:
 
     waited = 0
     while waited < MAX_WAIT:
+        # A "Pause run" admin action sets this row to paused and asks the
+        # trainer to stop out-of-band; check for that before trusting the
+        # trainer's status, since a killed process reports as errored there.
+        run.refresh_from_db(fields=["status"])
+        if run.status == TrainingRun.PAUSED:
+            return {"status": "paused"}
         status = runner.fetch_status(run)
         state = status.get("status")
         if state == "ok":
